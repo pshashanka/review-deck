@@ -8,6 +8,7 @@ optional for reads of public repos and required for posting;
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
@@ -55,6 +56,9 @@ class PullRequest:
     head_ref: str
     files: list[PRFile]
     truncated: bool = False
+    skipped_files: list[str] = field(default_factory=list)
+    # skipped filename -> (additions, deletions) as reported by GitHub
+    skipped_changes: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
 TITLE_LIMIT = 120
@@ -242,8 +246,13 @@ def fetch_pr(
     client: httpx.Client | None = None,
     max_total_chars: int = 60_000,
     max_file_patch_chars: int = 20_000,
+    skip: Callable[[str], bool] | None = None,
 ) -> PullRequest:
-    """Fetch a PR and its line-annotated file patches, within size budgets."""
+    """Fetch a PR and its line-annotated file patches, within size budgets.
+
+    Files for which ``skip(filename)`` is true are left out (and listed in
+    ``skipped_files``) without counting against the size budgets.
+    """
     own_client = client is None
     client = client or httpx.Client(timeout=TIMEOUT_SECONDS)
     try:
@@ -255,7 +264,7 @@ def fetch_pr(
             client.close()
 
     try:
-        return _build_pr(owner, repo, number, meta, raw_files, max_total_chars, max_file_patch_chars)
+        return _build_pr(owner, repo, number, meta, raw_files, max_total_chars, max_file_patch_chars, skip)
     except (KeyError, TypeError, AttributeError) as exc:
         raise GitHubError(f"Unexpected GitHub response: missing or invalid {exc}") from exc
 
@@ -268,12 +277,19 @@ def _build_pr(
     raw_files: list[dict],
     max_total_chars: int,
     max_file_patch_chars: int,
+    skip: Callable[[str], bool] | None = None,
 ) -> PullRequest:
     files: list[PRFile] = []
+    skipped: list[str] = []
+    skipped_changes: dict[str, tuple[int, int]] = {}
     total = 0
     truncated = False
     for item in raw_files:
         name, status = item["filename"], item.get("status", "modified")
+        if skip and skip(name):
+            skipped.append(name)
+            skipped_changes[name] = (int(item.get("additions") or 0), int(item.get("deletions") or 0))
+            continue
         patch = item.get("patch")
         if not patch:
             note = "[no textual patch available (binary, empty or too large for GitHub)]"
@@ -303,6 +319,8 @@ def _build_pr(
         head_ref=meta["head"]["ref"],
         files=files,
         truncated=truncated,
+        skipped_files=skipped,
+        skipped_changes=skipped_changes,
     )
 
 

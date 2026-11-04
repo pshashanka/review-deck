@@ -131,7 +131,7 @@ export const demonstrationCatalogDefinitions = {
     props: z.object({
       findingId: DynString.describe("Unique finding id; resets button state."),
       severity: DynString.describe("high | medium | low"),
-      category: DynString.describe("lint | security | tests | regression"),
+      category: DynString.describe("security | tests | correctness"),
       title: DynString,
       explanation: DynString,
       file: DynString,
@@ -159,7 +159,7 @@ export const demonstrationCatalogDefinitions = {
     props: z.object({
       findingId: DynString,
       severity: DynString.describe("high | medium | low"),
-      category: DynString.describe("lint | security | tests | regression"),
+      category: DynString.describe("security | tests | correctness"),
       title: DynString,
       explanation: DynString,
       file: DynString,

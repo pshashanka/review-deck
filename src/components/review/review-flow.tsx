@@ -14,7 +14,7 @@ import "@xyflow/react/dist/style.css";
 import "./review-flow.css";
 import { useAgent, UseAgentUpdate } from "@copilotkit/react-core/v2";
 import { useTheme } from "@/hooks/use-theme";
-import type { ReviewState, Severity } from "@/lib/types";
+import type { NodeUsage, ReviewState, ReviewStats, Severity } from "@/lib/types";
 
 type NodeStatus =
   | "idle"
@@ -32,16 +32,16 @@ type FlowNodeData = {
   slow?: boolean;
   model?: string;
   modelTitle?: string;
+  usage?: string;
 };
 type FlowNode = Node<FlowNodeData, "step">;
 
 const LABELS: Record<string, string> = {
   input: "Input",
   fetch_pr: "Fetch PR",
-  lint_review: "Lint",
   security_review: "Security",
   tests_review: "Tests",
-  regression_review: "Regression",
+  correctness_review: "Correctness",
   approval_gate: "Approval gate",
   summarize: "Summarize",
   render_findings: "Render findings",
@@ -56,13 +56,12 @@ const POSITIONS: Record<string, { x: number; y: number }> = {
   handle_action: { x: 540, y: 60 },
   fetch_pr: { x: 170, y: 90 },
   fetch_error: { x: 380, y: 130 },
-  lint_review: { x: -70, y: 190 },
-  security_review: { x: 90, y: 190 },
-  tests_review: { x: 250, y: 190 },
-  regression_review: { x: 410, y: 190 },
-  approval_gate: { x: 170, y: 290 },
-  summarize: { x: 170, y: 380 },
-  render_findings: { x: 170, y: 470 },
+  security_review: { x: 10, y: 200 },
+  tests_review: { x: 170, y: 200 },
+  correctness_review: { x: 330, y: 200 },
+  approval_gate: { x: 170, y: 330 },
+  summarize: { x: 170, y: 430 },
+  render_findings: { x: 170, y: 540 },
 };
 
 const EDGE_PAIRS: [string, string][] = [
@@ -71,14 +70,12 @@ const EDGE_PAIRS: [string, string][] = [
   ["input", "fetch_pr"],
   ["handle_action", "render_findings"],
   ["fetch_pr", "fetch_error"],
-  ["fetch_pr", "lint_review"],
   ["fetch_pr", "security_review"],
   ["fetch_pr", "tests_review"],
-  ["fetch_pr", "regression_review"],
-  ["lint_review", "approval_gate"],
+  ["fetch_pr", "correctness_review"],
   ["security_review", "approval_gate"],
   ["tests_review", "approval_gate"],
-  ["regression_review", "approval_gate"],
+  ["correctness_review", "approval_gate"],
   ["approval_gate", "summarize"],
   ["summarize", "render_findings"],
 ];
@@ -87,25 +84,45 @@ const EDGE_PAIRS: [string, string][] = [
 const SLOW_THRESHOLD_S = 30;
 
 const LLM_NODES = new Set([
-  "lint_review",
   "security_review",
   "tests_review",
-  "regression_review",
+  "correctness_review",
   "summarize",
   "chat",
 ]);
 
 const REVIEWER_NAMES: Record<string, string> = {
-  lint_review: "Lint reviewer",
   security_review: "Security reviewer",
   tests_review: "Tests reviewer",
-  regression_review: "Regression reviewer",
+  correctness_review: "Correctness reviewer",
 };
 
 const shortModel = (spec: string) => {
   const i = spec.indexOf(":");
   return i >= 0 ? spec.slice(i + 1) : spec;
 };
+
+const fmtNum = (n: number) => {
+  if (!Number.isFinite(n)) return "0";
+  if (n >= 1e6) return `${(n / 1e6).toFixed(1).replace(/\.0$/, "")}M`;
+  if (n >= 1e3) return `${(n / 1e3).toFixed(1).replace(/\.0$/, "")}k`;
+  return String(Math.round(n));
+};
+const fmtCost = (c: number) => `$${c < 0.01 ? c.toFixed(4) : c.toFixed(3)}`;
+const num = (v: unknown) =>
+  typeof v === "number" && Number.isFinite(v) ? v : 0;
+
+function usageLine(u: NodeUsage, reviewer: boolean): string {
+  const parts = [
+    `${fmtNum(num(u.input_tokens))} in`,
+    `${fmtNum(num(u.output_tokens))} out`,
+  ];
+  if (num(u.cached_tokens) > 0) parts.push(`${fmtNum(num(u.cached_tokens))} cached`);
+  if (typeof u.cost_usd === "number") parts.push(fmtCost(u.cost_usd));
+  if (reviewer && typeof u.files === "number")
+    parts.push(`${u.files} file${u.files === 1 ? "" : "s"}`);
+  return parts.join(" \u00b7 ");
+}
 
 const MINOR = new Set(["chat", "handle_action", "fetch_error"]);
 
@@ -127,6 +144,7 @@ function StepNode({ data }: NodeProps<FlowNode>) {
           {data.model}
         </div>
       )}
+      {data.usage && <div className="review-node-usage">{data.usage}</div>}
       {data.status === "timeout" && (
         <div className="review-node-note review-node-timeout-note">
           &#9201; timed out
@@ -242,6 +260,17 @@ export function ReviewFlow() {
   const nodeModels: Record<string, string> = isRecord(state.node_models)
     ? (state.node_models as Record<string, string>)
     : {};
+  const nodeUsage: Record<string, NodeUsage> = isRecord(state.node_usage)
+    ? (state.node_usage as Record<string, NodeUsage>)
+    : {};
+  const stats: ReviewStats | null = isRecord(state.review_stats)
+    ? (state.review_stats as ReviewStats)
+    : null;
+  const skipped: string[] = Array.isArray(stats?.skipped_files)
+    ? (stats.skipped_files as unknown[]).filter(
+        (f): f is string => typeof f === "string",
+      )
+    : [];
   const pr = isRecord(state.pr) ? state.pr : null;
   const findings = Array.isArray(state.findings) ? state.findings : [];
   const errorText =
@@ -314,6 +343,9 @@ export function ReviewFlow() {
       d.model = shortModel(spec);
       d.modelTitle = spec;
     }
+    const u = nodeUsage[id];
+    if (LLM_NODES.has(id) && isRecord(u))
+      d.usage = usageLine(u, id.endsWith("_review"));
     if (statuses[id] === "running") {
       const start = startRef.current.get(id);
       if (start !== undefined) {
@@ -330,7 +362,7 @@ export function ReviewFlow() {
   const infoKey = Object.keys(LABELS)
     .map((id) => {
       const d = info[id];
-      return `${d.time ?? ""}|${d.slow ? 1 : 0}|${d.modelTitle ?? ""}`;
+      return `${d.time ?? ""}|${d.slow ? 1 : 0}|${d.modelTitle ?? ""}|${d.usage ?? ""}`;
     })
     .join(",");
 
@@ -443,6 +475,43 @@ export function ReviewFlow() {
               {pr.owner}/{pr.repo}#{pr.number}
               {pr.author && <> &middot; {pr.author}</>}
             </div>
+          </div>
+        )}
+        {stats && (
+          <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] text-[var(--card-foreground)] p-3 text-xs space-y-1">
+            <div>
+              <span className="font-semibold">Tokens</span>{" "}
+              <span className="text-[var(--muted-foreground)]">
+                {fmtNum(num(stats.input_tokens))} in &middot;{" "}
+                {fmtNum(num(stats.output_tokens))} out &middot;{" "}
+                {fmtNum(num(stats.cached_tokens))} cached &middot;{" "}
+                {typeof stats.cost_usd === "number"
+                  ? fmtCost(stats.cost_usd)
+                  : "cost n/a \u2014 set MODEL_PRICES"}
+                {stats.partial && (
+                  <span
+                    className="ml-1 italic"
+                    title="some reviewers failed or timed out; their usage isn't counted"
+                  >
+                    (partial)
+                  </span>
+                )}
+              </span>
+            </div>
+            {skipped.length > 0 && (
+              <details className="text-[var(--muted-foreground)]">
+                <summary className="cursor-pointer">
+                  Skipped {skipped.length} file{skipped.length === 1 ? "" : "s"}{" "}
+                  (lock/generated/vendor)
+                  {num(stats.files_total) > 0 && <> of {stats.files_total}</>}
+                </summary>
+                <ul className="mt-1 pl-4 list-disc break-all">
+                  {skipped.map((f) => (
+                    <li key={f}>{f}</li>
+                  ))}
+                </ul>
+              </details>
+            )}
           </div>
         )}
         <div className="flex gap-2 flex-wrap">
