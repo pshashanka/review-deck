@@ -18,6 +18,22 @@ import { z } from "zod";
  */
 const DynString = z.union([z.string(), z.object({ path: z.string() })]);
 
+const DynNumber = z.union([z.number(), z.object({ path: z.string() })]);
+const DynBool = z.union([z.boolean(), z.object({ path: z.string() })]);
+
+/** Action prop: the renderer receives a zero-arg function (or undefined). */
+const ActionProp = z
+  .union([
+    z.object({
+      event: z.object({
+        name: z.string(),
+        context: z.record(z.any()).optional(),
+      }),
+    }),
+    z.null(),
+  ])
+  .optional();
+
 export const demonstrationCatalogDefinitions = {
   Title: {
     description: "A heading. Use for section titles and page headers.",
@@ -59,50 +75,9 @@ export const demonstrationCatalogDefinitions = {
     }),
   },
 
-  DashboardCard: {
-    description:
-      "A card container with title and optional subtitle. Has a 'child' slot for content (chart, metrics, etc). Use 'child' with a single component ID.",
-    props: z.object({
-      title: z.string(),
-      subtitle: z.string().optional(),
-      child: z.string().optional(),
-    }),
-  },
 
-  Metric: {
-    description:
-      "A key metric display with label, value, and optional trend indicator. Great for KPIs and stats.",
-    props: z.object({
-      label: z.string(),
-      value: z.string(),
-      trend: z.enum(["up", "down", "neutral"]).optional(),
-      trendValue: z.string().optional(),
-    }),
-  },
 
-  PieChart: {
-    description:
-      "A pie/donut chart. Provide data as array of {label, value, color} objects.",
-    props: z.object({
-      data: z.array(
-        z.object({
-          label: z.string(),
-          value: z.number(),
-          color: z.string().optional(),
-        }),
-      ),
-      innerRadius: z.number().optional(),
-    }),
-  },
 
-  BarChart: {
-    description:
-      "A bar chart. Provide data as array of {label, value} objects.",
-    props: z.object({
-      data: z.array(z.object({ label: z.string(), value: z.number() })),
-      color: z.string().optional(),
-    }),
-  },
 
   Badge: {
     description:
@@ -115,13 +90,6 @@ export const demonstrationCatalogDefinitions = {
     }),
   },
 
-  DataTable: {
-    description: "A data table with columns and rows.",
-    props: z.object({
-      columns: z.array(z.object({ key: z.string(), label: z.string() })),
-      rows: z.array(z.record(z.any())),
-    }),
-  },
 
   Button: {
     description:
@@ -148,33 +116,91 @@ export const demonstrationCatalogDefinitions = {
     }),
   },
 
-  FlightCard: {
+
+  Note: {
     description:
-      "A rich flight result card. Displays airline, flight number, route, times, duration, status, and price. Use inside a Row for side-by-side layout.",
+      "A short muted note (line breaks preserved). Accepts a literal or a data-model path binding.",
     props: z.object({
-      airline: DynString,
-      airlineLogo: DynString,
-      flightNumber: DynString,
-      origin: DynString,
-      destination: DynString,
-      date: DynString,
-      departureTime: DynString,
-      arrivalTime: DynString,
-      duration: DynString,
-      status: DynString,
-      statusColor: DynString.optional(),
-      price: DynString,
-      action: z
-        .union([
-          z.object({
-            event: z.object({
-              name: z.string(),
-              context: z.record(z.any()).optional(),
-            }),
-          }),
-          z.null(),
-        ])
-        .optional(),
+      text: DynString,
+    }),
+  },
+
+  FindingCard: {
+    description:
+      "A code-review finding card: severity, category, title, explanation, file:line, optional suggested fix, status, and Apply fix / Dismiss buttons. Use as a template item over a findings list.",
+    props: z.object({
+      findingId: DynString.describe("Unique finding id; resets button state."),
+      severity: DynString.describe("high | medium | low"),
+      category: DynString.describe("lint | security | tests | regression"),
+      title: DynString,
+      explanation: DynString,
+      file: DynString,
+      line: DynNumber,
+      suggestion: DynString.optional().describe(
+        "Suggested replacement code; empty hides Apply fix.",
+      ),
+      status: DynString.describe(
+        "open | approved | applied | dismissed; buttons only act on open/approved.",
+      ),
+      commentUrl: DynString.optional().describe(
+        "URL of the posted GitHub comment (empty until applied).",
+      ),
+      error: DynString.optional().describe(
+        "Last apply error, human-readable (empty when none).",
+      ),
+      applyAction: ActionProp,
+      dismissAction: ActionProp,
+    }),
+  },
+
+  ApprovalItem: {
+    description:
+      "A high-severity finding awaiting a human decision: same visuals as FindingCard plus a decision pill (pending | approved | rejected) and Approve / Reject buttons. Use as a template item.",
+    props: z.object({
+      findingId: DynString,
+      severity: DynString.describe("high | medium | low"),
+      category: DynString.describe("lint | security | tests | regression"),
+      title: DynString,
+      explanation: DynString,
+      file: DynString,
+      line: DynNumber,
+      decision: DynString.describe("pending | approved | rejected"),
+      approveAction: ActionProp,
+      rejectAction: ActionProp,
+    }),
+  },
+
+  ApprovalHeader: {
+    description: "Header of the approval form: message plus PR title and ref.",
+    props: z.object({
+      title: DynString,
+      repoRef: DynString,
+      message: DynString,
+    }),
+  },
+
+  ApprovalFooter: {
+    description:
+      "Footer of the approval form with 'Approve all' and 'Submit decisions' buttons.",
+    props: z.object({
+      approveAllAction: ActionProp,
+      submitAction: ActionProp,
+    }),
+  },
+
+  ReviewSummary: {
+    description:
+      "Header for a PR review: linked title, owner/repo#number, author, severity counts, summary text, and a truncation note.",
+    props: z.object({
+      title: DynString,
+      url: DynString,
+      repoRef: DynString.describe("e.g. owner/repo#123"),
+      author: DynString,
+      high: DynNumber,
+      medium: DynNumber,
+      low: DynNumber,
+      summary: DynString.optional(),
+      truncated: DynBool.optional(),
     }),
   },
 };

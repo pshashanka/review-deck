@@ -8,10 +8,18 @@ import { useFrontendTool } from "@copilotkit/react-core/v2";
 interface ExampleLayoutProps {
   chatContent: ReactNode;
   appContent: ReactNode;
+  defaultMode?: "chat" | "app";
+  /** Rendered at the right end of the chat header row. */
+  headerActions?: ReactNode;
 }
 
-export function ExampleLayout({ chatContent, appContent }: ExampleLayoutProps) {
-  const [mode, setMode] = useState<"chat" | "app">("chat");
+export function ExampleLayout({
+  chatContent,
+  appContent,
+  defaultMode = "chat",
+  headerActions,
+}: ExampleLayoutProps) {
+  const [mode, setMode] = useState<"chat" | "app">(defaultMode);
 
   useFrontendTool({
     name: "enableAppMode",
@@ -52,12 +60,11 @@ export function ExampleLayout({ chatContent, appContent }: ExampleLayoutProps) {
             vertically center the logo with that launcher and the top-right
             Chat/App toggle (both pinned at top-2). */}
         <div className="shrink-0 pt-[23px] pl-[max(1.5rem,calc(7rem_-_var(--cpk-drawer-reserved-width,320px)))] pb-2 max-lg:pl-24 max-lg:pb-4 flex gap-1.5 items-center align-center">
-          <span className="font-extrabold text-2xl">CopilotKit</span>
-          <img
-            src="/copilotkit-logo-mark.svg"
-            alt="CopilotKit"
-            className="h-7"
-          />
+          <span className="font-extrabold text-2xl">review-deck</span>
+          <span className="text-xs text-[var(--muted-foreground)] self-end pb-1">
+            built with CopilotKit
+          </span>
+          {headerActions && <div className="ml-auto pr-28">{headerActions}</div>}
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto">{chatContent}</div>
       </div>

@@ -1,5 +1,6 @@
 "use client";
 
+import "@/lib/a2ui-theme.css";
 import "./globals.css";
 import "@copilotkit/react-core/v2/styles.css";
 
@@ -14,7 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <title>CopilotKit</title>
+        <title>review-deck</title>
         <link
           rel="icon"
           type="image/svg+xml"
@@ -46,7 +47,6 @@ export default function RootLayout({
           <CopilotKit
             runtimeUrl="/api/copilotkit"
             a2ui={{ catalog: demonstrationCatalog }}
-            openGenerativeUI={{}}
             useSingleEndpoint={false}
           >
             {children}

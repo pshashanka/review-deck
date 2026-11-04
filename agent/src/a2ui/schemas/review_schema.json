@@ -1,0 +1,48 @@
+[
+  {
+    "id": "root",
+    "component": "Column",
+    "gap": 12,
+    "children": ["summary-card", "findings-list"]
+  },
+  {
+    "id": "summary-card",
+    "component": "ReviewSummary",
+    "title": { "path": "/pr/title" },
+    "url": { "path": "/pr/url" },
+    "repoRef": { "path": "/pr/ref" },
+    "author": { "path": "/pr/author" },
+    "high": { "path": "/counts/high" },
+    "medium": { "path": "/counts/medium" },
+    "low": { "path": "/counts/low" },
+    "summary": { "path": "/summary" },
+    "truncated": { "path": "/pr/truncated" }
+  },
+  {
+    "id": "findings-list",
+    "component": "Column",
+    "gap": 10,
+    "children": { "componentId": "finding-card", "path": "/findings" }
+  },
+  {
+    "id": "finding-card",
+    "component": "FindingCard",
+    "findingId": { "path": "id" },
+    "severity": { "path": "severity" },
+    "category": { "path": "category" },
+    "title": { "path": "title" },
+    "explanation": { "path": "explanation" },
+    "file": { "path": "file" },
+    "line": { "path": "line" },
+    "suggestion": { "path": "suggestion" },
+    "status": { "path": "status" },
+    "commentUrl": { "path": "comment_url" },
+    "error": { "path": "error" },
+    "applyAction": {
+      "event": { "name": "apply_fix", "context": { "findingId": { "path": "id" } } }
+    },
+    "dismissAction": {
+      "event": { "name": "dismiss", "context": { "findingId": { "path": "id" } } }
+    }
+  }
+]

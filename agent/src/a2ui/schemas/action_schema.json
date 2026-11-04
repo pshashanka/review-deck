@@ -1,0 +1,40 @@
+[
+  {
+    "id": "root",
+    "component": "Column",
+    "gap": 8,
+    "children": ["note", "findings-list"]
+  },
+  {
+    "id": "note",
+    "component": "Note",
+    "text": { "path": "/note" }
+  },
+  {
+    "id": "findings-list",
+    "component": "Column",
+    "gap": 10,
+    "children": { "componentId": "finding-card", "path": "/findings" }
+  },
+  {
+    "id": "finding-card",
+    "component": "FindingCard",
+    "findingId": { "path": "id" },
+    "severity": { "path": "severity" },
+    "category": { "path": "category" },
+    "title": { "path": "title" },
+    "explanation": { "path": "explanation" },
+    "file": { "path": "file" },
+    "line": { "path": "line" },
+    "suggestion": { "path": "suggestion" },
+    "status": { "path": "status" },
+    "commentUrl": { "path": "comment_url" },
+    "error": { "path": "error" },
+    "applyAction": {
+      "event": { "name": "apply_fix", "context": { "findingId": { "path": "id" } } }
+    },
+    "dismissAction": {
+      "event": { "name": "dismiss", "context": { "findingId": { "path": "id" } } }
+    }
+  }
+]

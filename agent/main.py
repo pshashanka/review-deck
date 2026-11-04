@@ -4,8 +4,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Load .env from the demo project root (one level up from agent/) BEFORE
-# importing src.agent — that import constructs the chat model at module load,
-# which needs COPILOTKIT_AGENT_MODEL and the provider key in the environment already.
+# importing src.agent so COPILOTKIT_AGENT_MODEL and the provider key are in the
+# environment before any node builds its chat model (models are created lazily, per call).
 _demo_root = Path(__file__).parent.parent
 for env_path in (_demo_root / ".env", Path(".env")):
     if env_path.is_file():
@@ -18,7 +18,7 @@ from fastapi import FastAPI
 import uvicorn
 from src.agent import graph
 from copilotkit import LangGraphAGUIAgent
-from ag_ui_langgraph import add_langgraph_fastapi_endpoint
+from src.endpoint import add_cancellable_endpoint
 
 app = FastAPI()
 
@@ -28,7 +28,7 @@ async def health():
     return {"status": "ok"}
 
 
-add_langgraph_fastapi_endpoint(
+add_cancellable_endpoint(
     app=app,
     agent=LangGraphAGUIAgent(
         name="sample_agent",

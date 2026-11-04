@@ -113,7 +113,6 @@
   --e-5: #2d0001;
   --e-0: #000000;
 
-  --primary: #137fec;
   --text-color: #fff;
   --background-light: #f6f7f8;
   --background-dark: #101922;
@@ -139,24 +138,4 @@
   --bb-grid-size-14: calc(var(--bb-grid-size) * 14);
   --bb-grid-size-15: calc(var(--bb-grid-size) * 15);
   --bb-grid-size-16: calc(var(--bb-grid-size) * 16);
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body {
-  --font-family: "Google Sans", "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --font-family-flex:
-    "Google Sans Flex", "Helvetica Neue", Helvetica, Arial, sans-serif;
-  --font-family-mono:
-    "Google Sans Code", "Helvetica Neue", Helvetica, Arial, sans-serif;
-
-  background: var(--background-light);
-  font-family: var(--font-family);
-  margin: 0;
-  padding: 0;
-  width: 100svw;
-  height: 100svh;
 }

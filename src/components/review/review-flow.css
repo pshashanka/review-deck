@@ -1,0 +1,63 @@
+@keyframes review-node-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(59, 130, 246, 0.55); }
+  50% { box-shadow: 0 0 0 6px rgba(59, 130, 246, 0); }
+}
+.review-node {
+  min-width: 110px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1.5px solid var(--border);
+  background: var(--muted);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: center;
+  transition: background 0.2s, border-color 0.2s, color 0.2s;
+}
+.review-node[data-status="running"] {
+  border-color: #3b82f6;
+  background: var(--card);
+  color: var(--card-foreground);
+  animation: review-node-pulse 1.4s ease-in-out infinite;
+}
+.review-node[data-status="done"] {
+  border-color: #22c55e;
+  background: color-mix(in srgb, #22c55e 14%, var(--card));
+  color: var(--card-foreground);
+}
+.review-node[data-status="error"] {
+  border-color: #ef4444;
+  background: color-mix(in srgb, #ef4444 14%, var(--card));
+  color: var(--card-foreground);
+}
+.review-node[data-status="interrupted"] {
+  border-color: #f59e0b;
+  background: color-mix(in srgb, #f59e0b 16%, var(--card));
+  color: var(--card-foreground);
+  animation: review-node-pulse 1.4s ease-in-out infinite;
+}
+.review-node[data-status="timeout"] {
+  border-color: #f97316;
+  border-style: dashed;
+  background: color-mix(in srgb, #f97316 12%, var(--card));
+  color: var(--card-foreground);
+}
+.review-node-model {
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+.review-node-note {
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+}
+.review-node-slow { color: #d97706; }
+.review-node-timeout-note { color: #ea580c; }
+.review-node[data-minor="true"] { opacity: 0.8; font-weight: 500; min-width: 90px; }
+.review-handle { opacity: 0 !important; pointer-events: none; }
+.react-flow__edge.review-edge-running .react-flow__edge-path { stroke: #3b82f6; }
+.react-flow__attribution { display: none; }
