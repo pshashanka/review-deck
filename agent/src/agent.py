@@ -1,51 +1,36 @@
-"""
-Workflow graph, state, tools, nodes and edges.
+"""PR-review graph.
 
-Mirrors the canonical langgraph-python demo so the two stay aligned. The
-FastAPI wrapper in main.py imports `graph` from here.
+START -> route_intake -> handle_action | fetch_pr | chat
+fetch_pr -> [lint_review, security_review, tests_review] (parallel) -> summarize
+         -> render_findings -> render_tools (ToolNode: render_review) -> END
+fetch_pr (error) -> fetch_error -> END
+handle_action -> render_findings;  chat -> END
 """
 
-from copilotkit import CopilotKitMiddleware, StateStreamingMiddleware, StateItem
-from langchain.agents import create_agent
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import END, START, StateGraph
+from langgraph.prebuilt import ToolNode
 
-from src.a2ui_dynamic_schema import generate_a2ui
-from src.model import create_chat_model
-from src.a2ui_fixed_schema import search_flights
-from src.query import query_data
-from src.todos import AgentState, todo_tools
+from src.review import nodes
+from src.review.state import ReviewState
 
-# COPILOTKIT_AGENT_MODEL (e.g. "anthropic:claude-sonnet-4-5") overrides this and
-# every other model site in the agent; unset, this site uses gpt-5.4.
-model = create_chat_model("openai:gpt-5.4", model_kwargs={"parallel_tool_calls": False})
+_b = StateGraph(ReviewState)
+for name in ("chat", "fetch_pr", "fetch_error", "lint_review", "security_review",
+             "tests_review", "summarize", "render_findings", "handle_action"):
+    _b.add_node(name, getattr(nodes, name))
+_b.add_node("render_tools", ToolNode([nodes.render_review]))
 
-# FastAPI-specific: langgraph-cli dev supplies its own checkpointer in the
-# reference demo. Here we run under uvicorn + ag-ui-langgraph, so the graph
-# needs an explicit MemorySaver for state/thread persistence within a
-# process.
-agent = create_agent(
-    model=model,
-    tools=[query_data, *todo_tools, generate_a2ui, search_flights],
-    middleware=[
-        CopilotKitMiddleware(),
-        StateStreamingMiddleware(
-            StateItem(state_key="todos", tool="manage_todos", tool_argument="todos")
-        ),
-    ],
-    state_schema=AgentState,
-    checkpointer=MemorySaver(),
-    system_prompt="""
-        You are a polished, professional demo assistant. Keep responses to 1-2 sentences.
-
-        Tool guidance:
-        - Flights: call search_flights to show flight cards with a pre-built schema.
-        - Dashboards & rich UI: call generate_a2ui to create dashboard UIs with metrics,
-          charts, tables, and cards. It handles rendering automatically.
-        - Charts: call query_data first, then render with the chart component.
-        - Todos: enable app mode first, then manage todos.
-        - A2UI actions: when you see a log_a2ui_event result (e.g. "view_details"),
-          respond with a brief confirmation. The UI already updated on the frontend.
-    """,
+_b.add_conditional_edges(START, nodes.route_intake, ["handle_action", "fetch_pr", "chat"])
+_b.add_conditional_edges(
+    "fetch_pr", nodes.after_fetch,
+    ["fetch_error", "lint_review", "security_review", "tests_review"],
 )
+_b.add_edge(["lint_review", "security_review", "tests_review"], "summarize")
+_b.add_edge("summarize", "render_findings")
+_b.add_edge("handle_action", "render_findings")
+_b.add_edge("render_findings", "render_tools")
+_b.add_edge("render_tools", END)
+_b.add_edge("chat", END)
+_b.add_edge("fetch_error", END)
 
-graph = agent
+graph = _b.compile(checkpointer=MemorySaver())

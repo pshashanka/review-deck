@@ -4,8 +4,8 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 # Load .env from the demo project root (one level up from agent/) BEFORE
-# importing src.agent — that import constructs the chat model at module load,
-# which needs COPILOTKIT_AGENT_MODEL and the provider key in the environment already.
+# importing src.agent so COPILOTKIT_AGENT_MODEL and the provider key are in the
+# environment before any node builds its chat model (models are created lazily, per call).
 _demo_root = Path(__file__).parent.parent
 for env_path in (_demo_root / ".env", Path(".env")):
     if env_path.is_file():
