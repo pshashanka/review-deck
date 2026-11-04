@@ -182,6 +182,95 @@ function ReviewButton({
   );
 }
 
+/** Shared finding visuals: severity stripe, pills, title, file:line, explanation, optional fix. */
+function FindingBody({
+  props,
+  statusLabel,
+  statusStyle,
+  suggestion,
+  children,
+}: {
+  props: Record<string, any>;
+  statusLabel: string;
+  statusStyle: { bg: string; color: string };
+  suggestion?: string;
+  children?: React.ReactNode;
+}) {
+  const sev = SEVERITY_STYLE[props.severity] ?? SEVERITY_STYLE.low;
+  return (
+    <div
+      style={{
+        border: `1px solid ${c.border}`,
+        borderLeft: `4px solid ${sev.stripe}`,
+        borderRadius: "12px",
+        padding: "14px 16px",
+        background: c.card,
+        color: c.cardFg,
+        display: "flex",
+        flexDirection: "column",
+        gap: "8px",
+        boxShadow: c.shadow,
+        width: "100%",
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          flexWrap: "wrap",
+          gap: "6px",
+        }}
+      >
+        <span style={pillStyle(sev.bg, sev.color)}>
+          {String(props.severity ?? "").toUpperCase()}
+        </span>
+        <span style={pillStyle("var(--muted)", c.cardFg)}>{props.category}</span>
+        <span style={{ flex: 1 }} />
+        <span style={pillStyle(statusStyle.bg, statusStyle.color)}>
+          {statusLabel}
+        </span>
+      </div>
+      <div style={{ fontSize: "0.95rem", fontWeight: 600 }}>{props.title}</div>
+      <div style={{ fontFamily: MONO, fontSize: "0.75rem", color: c.muted }}>
+        {props.file}:{props.line}
+      </div>
+      <div style={{ fontSize: "0.85rem", lineHeight: 1.5 }}>
+        {props.explanation}
+      </div>
+      {suggestion && (
+        <details>
+          <summary
+            style={{ cursor: "pointer", fontSize: "0.8rem", color: c.muted }}
+          >
+            Suggested fix
+          </summary>
+          <pre
+            style={{
+              margin: "6px 0 0",
+              padding: "10px 12px",
+              borderRadius: "8px",
+              background: "var(--muted)",
+              fontFamily: MONO,
+              fontSize: "0.75rem",
+              overflowX: "auto",
+              whiteSpace: "pre",
+            }}
+          >
+            {suggestion}
+          </pre>
+        </details>
+      )}
+      {children}
+    </div>
+  );
+}
+
+const DECISION_STYLE: Record<string, { bg: string; color: string }> = {
+  pending: { bg: "#dbeafe", color: "#1e40af" },
+  approved: { bg: "#dcfce7", color: "#166534" },
+  rejected: { bg: "#fee2e2", color: "#991b1b" },
+};
+
 // ─── Renderers (type-checked against schema definitions) ────────────
 
 const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefinitions> =
@@ -674,7 +763,6 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
     FindingCard: ({ props: rawProps }) => {
       // The binder resolves path bindings to plain values at runtime.
       const props = rawProps as Record<string, any>;
-      const sev = SEVERITY_STYLE[props.severity] ?? SEVERITY_STYLE.low;
       const st = STATUS_STYLE[props.status] ?? STATUS_STYLE.open;
       const actionable = props.status === "open" || props.status === "approved";
       const resetKey = `${props.findingId}:${props.status}`;
@@ -682,70 +770,12 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
         typeof props.suggestion === "string" ? props.suggestion : "";
 
       return (
-        <div
-          style={{
-            border: `1px solid ${c.border}`,
-            borderLeft: `4px solid ${sev.stripe}`,
-            borderRadius: "12px",
-            padding: "14px 16px",
-            background: c.card,
-            color: c.cardFg,
-            display: "flex",
-            flexDirection: "column",
-            gap: "8px",
-            boxShadow: c.shadow,
-            width: "100%",
-          }}
+        <FindingBody
+          props={props}
+          statusLabel={String(props.status)}
+          statusStyle={st}
+          suggestion={suggestion}
         >
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              flexWrap: "wrap",
-              gap: "6px",
-            }}
-          >
-            <span style={pillStyle(sev.bg, sev.color)}>
-              {String(props.severity ?? "").toUpperCase()}
-            </span>
-            <span style={pillStyle("var(--muted)", c.cardFg)}>
-              {props.category}
-            </span>
-            <span style={{ flex: 1 }} />
-            <span style={pillStyle(st.bg, st.color)}>{props.status}</span>
-          </div>
-          <div style={{ fontSize: "0.95rem", fontWeight: 600 }}>
-            {props.title}
-          </div>
-          <div style={{ fontFamily: MONO, fontSize: "0.75rem", color: c.muted }}>
-            {props.file}:{props.line}
-          </div>
-          <div style={{ fontSize: "0.85rem", lineHeight: 1.5 }}>
-            {props.explanation}
-          </div>
-          {suggestion && (
-            <details>
-              <summary
-                style={{ cursor: "pointer", fontSize: "0.8rem", color: c.muted }}
-              >
-                Suggested fix
-              </summary>
-              <pre
-                style={{
-                  margin: "6px 0 0",
-                  padding: "10px 12px",
-                  borderRadius: "8px",
-                  background: "var(--muted)",
-                  fontFamily: MONO,
-                  fontSize: "0.75rem",
-                  overflowX: "auto",
-                  whiteSpace: "pre",
-                }}
-              >
-                {suggestion}
-              </pre>
-            </details>
-          )}
           <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
             {suggestion && (
               <ReviewButton
@@ -763,9 +793,71 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
               resetKey={resetKey}
             />
           </div>
+        </FindingBody>
+      );
+    },
+
+    ApprovalItem: ({ props: rawProps }) => {
+      const props = rawProps as Record<string, any>;
+      const decision = String(props.decision ?? "pending");
+      const st = DECISION_STYLE[decision] ?? DECISION_STYLE.pending;
+      // Decisions are changeable until submit, so no pending-click guard (resetKey
+      // includes the decision so the guard never sticks).
+      const key = `${props.findingId}:${decision}`;
+      return (
+        <FindingBody props={props} statusLabel={decision} statusStyle={st}>
+          <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+            <ReviewButton
+              label="Approve"
+              action={props.approveAction}
+              disabled={decision === "approved"}
+              primary={decision !== "approved"}
+              resetKey={key}
+            />
+            <ReviewButton
+              label="Reject"
+              action={props.rejectAction}
+              disabled={decision === "rejected"}
+              resetKey={key}
+            />
+          </div>
+        </FindingBody>
+      );
+    },
+
+    ApprovalHeader: ({ props: rawProps }) => {
+      const props = rawProps as Record<string, any>;
+      return (
+        <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+          <div style={{ fontSize: "1rem", fontWeight: 600 }}>{props.message}</div>
+          <div style={{ fontSize: "0.8rem", color: c.muted }}>
+            {props.title} ·{" "}
+            <span style={{ fontFamily: MONO }}>{props.repoRef}</span>
+          </div>
+          <div style={{ fontSize: "0.8rem", color: "#92400e" }}>
+            Submit your decisions to continue — chat is paused until then.
+          </div>
         </div>
       );
     },
+
+    ApprovalFooter: ({ props }) => (
+      <div style={{ display: "flex", gap: "8px", justifyContent: "flex-end" }}>
+        <ReviewButton
+          label="Approve all"
+          action={props.approveAllAction}
+          disabled={false}
+          resetKey="approve_all"
+        />
+        <ReviewButton
+          label="Submit decisions"
+          action={props.submitAction}
+          disabled={false}
+          primary
+          resetKey="submit"
+        />
+      </div>
+    ),
 
     ReviewSummary: ({ props: rawProps }) => {
       const props = rawProps as Record<string, any>;

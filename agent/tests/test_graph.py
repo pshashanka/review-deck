@@ -2,6 +2,7 @@ import json
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.types import Command
 
 from src import github
 from src.agent import graph
@@ -357,12 +358,150 @@ async def test_cross_category_dedupe_in_graph(monkeypatch):
     assert "Verdict (fixed): Approve with nits" in summ.calls[0][1].content
 
 
-async def test_high_finding_requests_changes(monkeypatch):
-    out, _, _ = await _run(monkeypatch, "d2", [PRF("a.py", {3})], {
-        "security": ReviewerOutput(findings=[RF(line=3, severity="high")]),
+# ------------------------------------------------------------ approval gate
+
+HIGH = {
+    "security": ReviewerOutput(findings=[RF(line=3, severity="high", title="Hardcoded key")]),
+    "lint": ReviewerOutput(findings=[RF(line=4, severity="low", title="nit")]),
+    "tests": ReviewerOutput(findings=[]),
+}
+HIGH_ID = "abc-security-1"
+
+
+async def _paused(monkeypatch, tid, outputs=HIGH):
+    out, _, _ = await _run(monkeypatch, tid, [PRF("a.py", {3, 4})], dict(outputs))
+    return out
+
+
+def _surface_data(out):
+    ops = json.loads(out["messages"][-1].content)["a2ui_operations"]
+    return next(op["updateDataModel"]["value"] for op in ops if "updateDataModel" in op)
+
+
+async def test_high_finding_pauses_for_approval(monkeypatch):
+    out = await _paused(monkeypatch, "ap1")
+    assert "__interrupt__" in out
+    state = await graph.aget_state(cfg("ap1"))
+    assert "approval_gate" in state.next
+    value = state.tasks[0].interrupts[0].value
+    assert value["type"] == "high_severity_review"
+    assert [f["id"] for f in value["findings"]] == [HIGH_ID]
+    assert "1 high-severity" in value["message"]
+    ops = value["a2ui_operations"]
+    assert ops[0]["createSurface"]["surfaceId"] == "pr-approval-7"
+    comps = next(op["updateComponents"]["components"] for op in ops if "updateComponents" in op)
+    assert {c["component"] for c in comps} >= {"ApprovalItem", "ApprovalFooter"}
+    data = next(op["updateDataModel"]["value"] for op in ops if "updateDataModel" in op)
+    assert [(f["id"], f["decision"]) for f in data["findings"]] == [(HIGH_ID, "pending")]
+    assert "summarize" not in (state.values.get("node_status") or {})
+
+
+async def test_reject_excludes_finding(monkeypatch):
+    await _paused(monkeypatch, "ap2")
+    out = await graph.ainvoke(Command(resume={"decisions": {HIGH_ID: "reject"}}), cfg("ap2"))
+    by_id = {f["id"]: f for f in out["findings"]}
+    assert by_id[HIGH_ID]["status"] == "rejected"
+    assert "Verdict: Approve with nits" in out["summary"]
+    assert "1 finding(s): 0 high" in out["summary"]
+    data = _surface_data(out)
+    assert [f["id"] for f in data["findings"]] == ["abc-lint-1"]
+    assert data["counts"] == {"high": 0, "medium": 0, "low": 1}
+    assert out["node_status"]["approval_gate"] == "done"
+
+
+async def test_approve_keeps_finding(monkeypatch):
+    await _paused(monkeypatch, "ap3")
+    out = await graph.ainvoke(Command(resume={"decisions": {HIGH_ID: "approve"}}), cfg("ap3"))
+    by_id = {f["id"]: f for f in out["findings"]}
+    assert by_id[HIGH_ID]["status"] == "approved"
+    assert by_id["abc-lint-1"]["status"] == "open"
+    assert "Verdict: Request changes" in out["summary"]
+    assert HIGH_ID in [f["id"] for f in _surface_data(out)["findings"]]
+
+
+async def test_no_high_no_interrupt(monkeypatch):
+    out, _, _ = await _run(monkeypatch, "ap4", [PRF("a.py", {3, 4})], {
+        "security": ReviewerOutput(findings=[RF(line=3, severity="medium")]),
         "lint": ReviewerOutput(findings=[]), "tests": ReviewerOutput(findings=[]),
     })
+    assert "__interrupt__" not in out
+    assert not (await graph.aget_state(cfg("ap4"))).next
+    assert out["node_status"]["approval_gate"] == "done"
+
+
+@pytest.mark.parametrize("answer", ["garbage", {"x": 1}, {"decisions": "nope"}, {"decisions": {"zzz": "reject"}}])
+async def test_malformed_resume_approves_all(monkeypatch, answer):
+    await _paused(monkeypatch, "ap5")
+    out = await graph.ainvoke(Command(resume=answer), cfg("ap5"))
+    assert {f["id"]: f["status"] for f in out["findings"]}[HIGH_ID] == "approved"
     assert "Verdict: Request changes" in out["summary"]
+
+
+async def test_resume_json_string(monkeypatch):
+    await _paused(monkeypatch, "ap6")
+    out = await graph.ainvoke(Command(resume=json.dumps({"decisions": {HIGH_ID: "reject"}})), cfg("ap6"))
+    assert {f["id"]: f["status"] for f in out["findings"]}[HIGH_ID] == "rejected"
+
+
+async def test_dedupe_happens_before_gate(monkeypatch):
+    # medium + high at the same line: the high one survives dedupe and is the only gated finding.
+    outs = {
+        "lint": ReviewerOutput(findings=[RF(line=3, severity="medium", title="m")]),
+        "security": ReviewerOutput(findings=[RF(line=3, severity="high", title="h")]),
+        "tests": ReviewerOutput(findings=[]),
+    }
+    await _paused(monkeypatch, "ap7", outs)
+    value = (await graph.aget_state(cfg("ap7"))).tasks[0].interrupts[0].value
+    assert [f["id"] for f in value["findings"]] == [HIGH_ID]
+    out = await graph.ainvoke(Command(resume={"decisions": {HIGH_ID: "reject"}}), cfg("ap7"))
+    assert [f["id"] for f in out["findings"]] == [HIGH_ID]
+    assert out["summary"].startswith("No findings.")
+    assert "rejected" in out["summary"]
+
+
+def test_parse_decisions():
+    ids = {"a", "b"}
+    assert nodes.parse_decisions({"decisions": {"a": "reject", "zz": "reject", "b": "wat"}}, ids) == {
+        "a": "reject", "b": "approve"}
+    assert nodes.parse_decisions('{"decisions": {"b": "reject"}}', ids) == {"a": "approve", "b": "reject"}
+    assert nodes.parse_decisions(42, ids) == {"a": "approve", "b": "approve"}
+
+
+def test_approval_schema_binding_contract():
+    high = [{"id": "a", "severity": "high", "category": "security", "title": "T", "explanation": "e",
+             "file": "a.py", "line": 1}]
+    ops = nodes.build_approval_ops({"owner": "o", "repo": "r", "number": 3, "title": "T"}, high, "msg")
+    data = next(op["updateDataModel"]["value"] for op in ops if "updateDataModel" in op)
+    schema = nodes.APPROVAL_SCHEMA
+    ids = {c["id"] for c in schema}
+    template_ids = set()
+    for c in schema:
+        ch = c.get("children")
+        refs = [ch["componentId"]] if isinstance(ch, dict) else (ch or [])
+        assert set(refs) <= ids, (c["id"], refs)
+        if isinstance(ch, dict):
+            template_ids.add(ch["componentId"])
+            assert ch["path"].strip("/") in data and data[ch["path"].strip("/")]
+    assert template_ids == {"approval-item"}
+    for c in schema:
+        paths: list[str] = []
+        _collect_paths({k: v for k, v in c.items() if k != "children"}, paths)
+        for path in paths:
+            if c["id"] in template_ids:
+                assert not path.startswith("/")
+                assert all(path in item for item in data["findings"]), (c["id"], path)
+            else:
+                cur = data
+                assert path.startswith("/"), (c["id"], path)
+                for part in path.strip("/").split("/"):
+                    assert part in cur, (c["id"], path)
+                    cur = cur[part]
+    item = next(c for c in schema if c["id"] == "approval-item")
+    assert item["approveAction"]["event"]["context"] == {"findingId": {"path": "id"}}
+    assert item["rejectAction"]["event"]["name"] == "reject"
+    footer = next(c for c in schema if c["id"] == "footer")
+    assert footer["approveAllAction"]["event"]["name"] == "approve_all"
+    assert footer["submitAction"]["event"]["name"] == "submit"
 
 
 async def test_untrusted_data_delimiters(monkeypatch):

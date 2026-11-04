@@ -216,6 +216,41 @@ export const demonstrationCatalogDefinitions = {
     }),
   },
 
+  ApprovalItem: {
+    description:
+      "A high-severity finding awaiting a human decision: same visuals as FindingCard plus a decision pill (pending | approved | rejected) and Approve / Reject buttons. Use as a template item.",
+    props: z.object({
+      findingId: DynString,
+      severity: DynString.describe("high | medium | low"),
+      category: DynString.describe("lint | security | tests"),
+      title: DynString,
+      explanation: DynString,
+      file: DynString,
+      line: DynNumber,
+      decision: DynString.describe("pending | approved | rejected"),
+      approveAction: ActionProp,
+      rejectAction: ActionProp,
+    }),
+  },
+
+  ApprovalHeader: {
+    description: "Header of the approval form: message plus PR title and ref.",
+    props: z.object({
+      title: DynString,
+      repoRef: DynString,
+      message: DynString,
+    }),
+  },
+
+  ApprovalFooter: {
+    description:
+      "Footer of the approval form with 'Approve all' and 'Submit decisions' buttons.",
+    props: z.object({
+      approveAllAction: ActionProp,
+      submitAction: ActionProp,
+    }),
+  },
+
   ReviewSummary: {
     description:
       "Header for a PR review: linked title, owner/repo#number, author, severity counts, summary text, and a truncation note.",

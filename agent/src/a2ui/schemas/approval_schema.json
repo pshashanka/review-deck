@@ -1,0 +1,45 @@
+[
+  {
+    "id": "root",
+    "component": "Column",
+    "gap": 12,
+    "children": ["header", "items-list", "footer"]
+  },
+  {
+    "id": "header",
+    "component": "ApprovalHeader",
+    "title": { "path": "/pr/title" },
+    "repoRef": { "path": "/pr/ref" },
+    "message": { "path": "/message" }
+  },
+  {
+    "id": "items-list",
+    "component": "Column",
+    "gap": 10,
+    "children": { "componentId": "approval-item", "path": "/findings" }
+  },
+  {
+    "id": "approval-item",
+    "component": "ApprovalItem",
+    "findingId": { "path": "id" },
+    "severity": { "path": "severity" },
+    "category": { "path": "category" },
+    "title": { "path": "title" },
+    "explanation": { "path": "explanation" },
+    "file": { "path": "file" },
+    "line": { "path": "line" },
+    "decision": { "path": "decision" },
+    "approveAction": {
+      "event": { "name": "approve", "context": { "findingId": { "path": "id" } } }
+    },
+    "rejectAction": {
+      "event": { "name": "reject", "context": { "findingId": { "path": "id" } } }
+    }
+  },
+  {
+    "id": "footer",
+    "component": "ApprovalFooter",
+    "approveAllAction": { "event": { "name": "approve_all" } },
+    "submitAction": { "event": { "name": "submit" } }
+  }
+]

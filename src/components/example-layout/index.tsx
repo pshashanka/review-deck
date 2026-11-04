@@ -9,12 +9,15 @@ interface ExampleLayoutProps {
   chatContent: ReactNode;
   appContent: ReactNode;
   defaultMode?: "chat" | "app";
+  /** Rendered at the right end of the chat header row. */
+  headerActions?: ReactNode;
 }
 
 export function ExampleLayout({
   chatContent,
   appContent,
   defaultMode = "chat",
+  headerActions,
 }: ExampleLayoutProps) {
   const [mode, setMode] = useState<"chat" | "app">(defaultMode);
 
@@ -63,6 +66,7 @@ export function ExampleLayout({
             alt="CopilotKit"
             className="h-7"
           />
+          {headerActions && <div className="ml-auto pr-28">{headerActions}</div>}
         </div>
         <div className="flex-1 min-h-0 overflow-y-auto">{chatContent}</div>
       </div>

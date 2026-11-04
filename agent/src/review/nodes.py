@@ -1,6 +1,7 @@
 """Graph nodes, router and the ``render_review`` tool."""
 
 import copy
+import json
 import logging
 import re
 import uuid
@@ -12,6 +13,7 @@ from copilotkit.langgraph import copilotkit_emit_state
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langgraph.types import interrupt
 
 from src import github
 from src.model import create_chat_model
@@ -24,7 +26,9 @@ CATALOG_ID = "copilotkit://app-dashboard-catalog"
 ACTION_TOOL = "log_a2ui_event"
 _PR_URL_RE = re.compile(r"https?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/pull/\d+[^\s]*")
 
-REVIEW_SCHEMA = a2ui.load_schema(Path(__file__).parent.parent / "a2ui" / "schemas" / "review_schema.json")
+_SCHEMAS = Path(__file__).parent.parent / "a2ui" / "schemas"
+REVIEW_SCHEMA = a2ui.load_schema(_SCHEMAS / "review_schema.json")
+APPROVAL_SCHEMA = a2ui.load_schema(_SCHEMAS / "approval_schema.json")
 
 
 # ---------------------------------------------------------------- helpers
@@ -387,22 +391,77 @@ def verdict_for(findings: list[dict]) -> str:
     return "Approve with nits" if findings else "Approve"
 
 
-async def summarize(state: ReviewState, config: RunnableConfig):
-    await _running(state, config, "summarize")
+def parse_decisions(answer: Any, ids: set[str]) -> dict[str, str]:
+    """Normalize a resume payload to {finding_id: "approve"|"reject"} covering every id.
+
+    Accepts a dict or JSON string shaped ``{"decisions": {id: "approve"|"reject"}}``.
+    Unknown ids are ignored, missing/invalid decisions default to approve, and a
+    malformed payload approves everything.
+    """
+    out = {i: "approve" for i in ids}
+    if isinstance(answer, str):
+        try:
+            answer = json.loads(answer)
+        except ValueError:
+            answer = None
+    decisions = answer.get("decisions") if isinstance(answer, dict) else None
+    if not isinstance(decisions, dict):
+        logger.warning("approval_gate: malformed resume payload %r; approving all", answer)
+        return out
+    for fid, d in decisions.items():
+        if fid in out and d == "reject":
+            out[fid] = "reject"
+    return out
+
+
+async def approval_gate(state: ReviewState, config: RunnableConfig):
+    """Dedupe, then pause for human review of open high-severity findings.
+
+    NOTE: on resume this node re-executes from the top, so everything before
+    ``interrupt()`` must stay idempotent and free of side effects.
+    """
+    await _running(state, config, "approval_gate")
     raw = state.get("findings", [])
     findings = dedupe_findings(raw)
+    update: dict[str, Any] = {"node_status": {"approval_gate": "done"}}
+    if len(findings) != len(raw):
+        logger.info("dedupe: dropped %d overlapping finding(s)", len(raw) - len(findings))
+    high = [f for f in findings if f["severity"] == "high" and f.get("status", "open") == "open"]
+    if high:
+        message = f"{len(high)} high-severity finding(s) need your review before the summary is published."
+        answer = interrupt({
+            "type": "high_severity_review",
+            "message": message,
+            "findings": high,
+            "a2ui_operations": build_approval_ops(state.get("pr") or {}, high, message),
+        })
+        decisions = parse_decisions(answer, {f["id"] for f in high})
+        status = {fid: ("rejected" if d == "reject" else "approved") for fid, d in decisions.items()}
+        findings = [{**f, "status": status[f["id"]]} if f["id"] in status else f for f in findings]
+        update["findings"] = [RESET, *findings] if len(findings) != len(raw) else [
+            f for f in findings if f["id"] in status
+        ]
+    elif len(findings) != len(raw):
+        update["findings"] = [RESET, *findings]
+    return update
+
+
+async def summarize(state: ReviewState, config: RunnableConfig):
+    await _running(state, config, "summarize")
+    all_findings = state.get("findings", [])
+    findings = [f for f in all_findings if f.get("status") != "rejected"]
+    rejected = len(all_findings) - len(findings)
     errors = state.get("review_errors", [])
     pr = state.get("pr") or {}
     update: dict[str, Any] = {"node_status": {"summarize": "done"}}
-    if len(findings) != len(raw):
-        logger.info("dedupe: dropped %d overlapping finding(s)", len(raw) - len(findings))
-        update["findings"] = [RESET, *findings]
     counts = {s: sum(1 for f in findings if f["severity"] == s) for s in ("high", "medium", "low")}
     if not findings and not errors:
         reviewable = any(f["valid_lines"] for f in state.get("files", []))
         summary = "No findings." if reviewable else "Nothing reviewable: no changed lines with patches in this PR."
         if reviewable and pr.get("truncated"):
             summary += "\n\nNote: the diff was truncated; files beyond the limit were not reviewed."
+        if rejected:
+            summary += f"\n\nNote: {rejected} finding(s) were rejected during review and are excluded."
         return {**update, "summary": summary}
 
     verdict = verdict_for(findings)
@@ -433,6 +492,8 @@ async def summarize(state: ReviewState, config: RunnableConfig):
     parts.append(counts_line)
     if pr.get("truncated"):
         parts.append("Note: the diff was truncated; files beyond the limit were not reviewed.")
+    if rejected:
+        parts.append(f"Note: {rejected} finding(s) were rejected during review and are excluded.")
     parts += [f"Note: {e}" for e in errors]
     return {**update, "summary": "\n\n".join(parts)}
 
@@ -495,6 +556,30 @@ def build_review_ops(state: dict[str, Any]) -> list[dict]:
     return [
         a2ui.create_surface(sid, catalog_id=CATALOG_ID),
         a2ui.update_components(sid, copy.deepcopy(REVIEW_SCHEMA)),
+        a2ui.update_data_model(sid, data),
+    ]
+
+
+def build_approval_ops(pr: dict[str, Any], high: list[dict], message: str) -> list[dict]:
+    sid = f"pr-approval-{pr.get('number', 0)}"
+    data = {
+        "pr": {
+            "title": pr.get("title") or "Pull request review",
+            "ref": f"{pr.get('owner', '')}/{pr.get('repo', '')}#{pr.get('number', 0)}",
+        },
+        "message": message,
+        "findings": [
+            {
+                "id": f["id"], "severity": f["severity"], "category": f["category"],
+                "title": f["title"], "explanation": f["explanation"], "file": f["file"],
+                "line": f["line"], "decision": "pending",
+            }
+            for f in high
+        ],
+    }
+    return [
+        a2ui.create_surface(sid, catalog_id=CATALOG_ID),
+        a2ui.update_components(sid, copy.deepcopy(APPROVAL_SCHEMA)),
         a2ui.update_data_model(sid, data),
     ]
 
