@@ -1,7 +1,7 @@
 "use client";
 
 import { ExampleLayout } from "@/components/example-layout";
-import { ExampleCanvas } from "@/components/example-canvas";
+import { ReviewFlow } from "@/components/review";
 import { useGenerativeUIExamples, useExampleSuggestions } from "@/hooks";
 
 import {
@@ -40,7 +40,8 @@ export default function HomePage() {
                 input={{ disclaimer: () => null, className: "pb-6" }}
               />
             }
-            appContent={<ExampleCanvas />}
+            defaultMode="app"
+            appContent={<ReviewFlow />}
           />
         </div>
       </div>

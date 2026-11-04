@@ -8,10 +8,15 @@ import { useFrontendTool } from "@copilotkit/react-core/v2";
 interface ExampleLayoutProps {
   chatContent: ReactNode;
   appContent: ReactNode;
+  defaultMode?: "chat" | "app";
 }
 
-export function ExampleLayout({ chatContent, appContent }: ExampleLayoutProps) {
-  const [mode, setMode] = useState<"chat" | "app">("chat");
+export function ExampleLayout({
+  chatContent,
+  appContent,
+  defaultMode = "chat",
+}: ExampleLayoutProps) {
+  const [mode, setMode] = useState<"chat" | "app">(defaultMode);
 
   useFrontendTool({
     name: "enableAppMode",
