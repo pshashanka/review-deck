@@ -1,7 +1,9 @@
 """Graph nodes, router and the ``render_review`` tool."""
 
+import copy
 import re
 import uuid
+from pathlib import Path
 from typing import Any
 
 from copilotkit import a2ui
@@ -19,7 +21,7 @@ CATALOG_ID = "copilotkit://app-dashboard-catalog"
 ACTION_TOOL = "log_a2ui_event"
 _PR_URL_RE = re.compile(r"https?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/pull/\d+[^\s]*")
 
-SEVERITY_VARIANT = {"high": "error", "medium": "warning", "low": "info"}
+REVIEW_SCHEMA = a2ui.load_schema(Path(__file__).parent.parent / "a2ui" / "schemas" / "review_schema.json")
 
 
 # ---------------------------------------------------------------- helpers
@@ -239,39 +241,35 @@ def build_review_ops(state: dict[str, Any]) -> list[dict]:
     sid = f"pr-review-{number}"
     findings = [f for f in state.get("findings", []) if f.get("status") != "rejected"]
     counts = {s: sum(1 for f in findings if f["severity"] == s) for s in ("high", "medium", "low")}
-    rows = [
-        {
-            "severity": f["severity"].upper(),
-            "category": f["category"],
-            "location": f"{f['file']}:{f['line']}",
-            "title": f["title"],
-        }
-        for f in findings
-    ]
-    components = [
-        {"id": "root", "component": "Column", "gap": 12,
-         "children": ["title", "subtitle", "badges", "table"]},
-        {"id": "title", "component": "Title", "text": pr.get("title", "Pull request review"), "level": "2"},
-        {"id": "subtitle", "component": "Badge",
-         "text": f"{pr.get('owner', '')}/{pr.get('repo', '')}#{number}", "variant": "neutral"},
-        {"id": "badges", "component": "Row", "gap": 8,
-         "children": ["b-high", "b-medium", "b-low"]},
-        {"id": "b-high", "component": "Badge", "text": f"{counts['high']} high", "variant": "error"},
-        {"id": "b-medium", "component": "Badge", "text": f"{counts['medium']} medium", "variant": "warning"},
-        {"id": "b-low", "component": "Badge", "text": f"{counts['low']} low", "variant": "info"},
-        {"id": "table", "component": "DataTable",
-         "columns": [
-             {"key": "severity", "label": "Severity"},
-             {"key": "category", "label": "Category"},
-             {"key": "location", "label": "Location"},
-             {"key": "title", "label": "Finding"},
-         ],
-         "rows": rows},
-    ]
+    data = {
+        "pr": {
+            "title": pr.get("title") or "Pull request review",
+            "url": pr.get("url", ""),
+            "ref": f"{pr.get('owner', '')}/{pr.get('repo', '')}#{number}",
+            "author": pr.get("author", ""),
+            "truncated": bool(pr.get("truncated")),
+        },
+        "counts": counts,
+        "summary": state.get("summary") or "",
+        "findings": [
+            {
+                "id": f["id"],
+                "severity": f["severity"],
+                "category": f["category"],
+                "title": f["title"],
+                "explanation": f["explanation"],
+                "file": f["file"],
+                "line": f["line"],
+                "suggestion": f.get("suggestion") or "",
+                "status": f.get("status", "open"),
+            }
+            for f in findings
+        ],
+    }
     return [
         a2ui.create_surface(sid, catalog_id=CATALOG_ID),
-        a2ui.update_components(sid, components),
-        a2ui.update_data_model(sid, {}),
+        a2ui.update_components(sid, copy.deepcopy(REVIEW_SCHEMA)),
+        a2ui.update_data_model(sid, data),
     ]
 
 

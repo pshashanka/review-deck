@@ -1,5 +1,6 @@
 "use client";
 
+import "@/lib/a2ui-theme.css";
 import "./globals.css";
 import "@copilotkit/react-core/v2/styles.css";
 

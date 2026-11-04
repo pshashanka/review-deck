@@ -12,7 +12,7 @@
  */
 "use client";
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   PieChart as RechartsPie,
   Pie,
@@ -96,6 +96,88 @@ function ActionButton({
         </svg>
       )}
       {done ? doneLabel : (child ?? label)}
+    </button>
+  );
+}
+
+// ─── Review components ──────────────────────────────────────────────
+
+const SEVERITY_STYLE: Record<
+  string,
+  { bg: string; color: string; stripe: string }
+> = {
+  high: { bg: "#fee2e2", color: "#991b1b", stripe: "#ef4444" },
+  medium: { bg: "#fef3c7", color: "#92400e", stripe: "#f59e0b" },
+  low: { bg: "#dbeafe", color: "#1e40af", stripe: "#3b82f6" },
+};
+
+const STATUS_STYLE: Record<string, { bg: string; color: string }> = {
+  open: { bg: "#dbeafe", color: "#1e40af" },
+  approved: { bg: "#fef3c7", color: "#92400e" },
+  applied: { bg: "#dcfce7", color: "#166534" },
+  dismissed: { bg: "var(--muted)", color: "var(--muted-foreground)" },
+};
+
+const pillStyle = (bg: string, color: string): React.CSSProperties => ({
+  display: "inline-block",
+  padding: "2px 8px",
+  borderRadius: "9999px",
+  fontSize: "0.7rem",
+  fontWeight: 500,
+  background: bg,
+  color,
+});
+
+const MONO =
+  "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)";
+
+function ReviewButton({
+  label,
+  action,
+  disabled,
+  primary,
+  resetKey,
+}: {
+  label: string;
+  action: any;
+  disabled: boolean;
+  primary?: boolean;
+  /** Pending state applies only to the key it was set for (finding id + status). */
+  resetKey: string;
+}) {
+  const [pendingFor, setPendingFor] = useState<string | null>(null);
+  // Brief pending guard against double-clicks; clears when the finding or its
+  // status changes, so a failed action or index-reused card is not stuck.
+  const pending = pendingFor === resetKey;
+  useEffect(() => {
+    if (pendingFor === null) return;
+    const t = setTimeout(() => setPendingFor(null), 2000);
+    return () => clearTimeout(t);
+  }, [pendingFor]);
+  const off = disabled || pending;
+  return (
+    <button
+      disabled={off}
+      onClick={() => {
+        if (!off) {
+          action?.();
+          setPendingFor(resetKey);
+        }
+      }}
+      style={{
+        padding: "6px 14px",
+        borderRadius: "8px",
+        border: `1px solid ${c.border}`,
+        background: primary && !off ? "var(--primary)" : c.btnBg,
+        color: primary && !off ? "var(--primary-foreground)" : c.cardFg,
+        fontSize: "0.8rem",
+        fontWeight: 500,
+        cursor: off ? "default" : "pointer",
+        opacity: off ? 0.5 : 1,
+        transition: "all 0.2s ease",
+      }}
+    >
+      {label}
     </button>
   );
 }
@@ -585,6 +667,168 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
               action={props.action}
             />
           </div>
+        </div>
+      );
+    },
+
+    FindingCard: ({ props: rawProps }) => {
+      // The binder resolves path bindings to plain values at runtime.
+      const props = rawProps as Record<string, any>;
+      const sev = SEVERITY_STYLE[props.severity] ?? SEVERITY_STYLE.low;
+      const st = STATUS_STYLE[props.status] ?? STATUS_STYLE.open;
+      const actionable = props.status === "open" || props.status === "approved";
+      const resetKey = `${props.findingId}:${props.status}`;
+      const suggestion =
+        typeof props.suggestion === "string" ? props.suggestion : "";
+
+      return (
+        <div
+          style={{
+            border: `1px solid ${c.border}`,
+            borderLeft: `4px solid ${sev.stripe}`,
+            borderRadius: "12px",
+            padding: "14px 16px",
+            background: c.card,
+            color: c.cardFg,
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+            boxShadow: c.shadow,
+            width: "100%",
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              flexWrap: "wrap",
+              gap: "6px",
+            }}
+          >
+            <span style={pillStyle(sev.bg, sev.color)}>
+              {String(props.severity ?? "").toUpperCase()}
+            </span>
+            <span style={pillStyle("var(--muted)", c.cardFg)}>
+              {props.category}
+            </span>
+            <span style={{ flex: 1 }} />
+            <span style={pillStyle(st.bg, st.color)}>{props.status}</span>
+          </div>
+          <div style={{ fontSize: "0.95rem", fontWeight: 600 }}>
+            {props.title}
+          </div>
+          <div style={{ fontFamily: MONO, fontSize: "0.75rem", color: c.muted }}>
+            {props.file}:{props.line}
+          </div>
+          <div style={{ fontSize: "0.85rem", lineHeight: 1.5 }}>
+            {props.explanation}
+          </div>
+          {suggestion && (
+            <details>
+              <summary
+                style={{ cursor: "pointer", fontSize: "0.8rem", color: c.muted }}
+              >
+                Suggested fix
+              </summary>
+              <pre
+                style={{
+                  margin: "6px 0 0",
+                  padding: "10px 12px",
+                  borderRadius: "8px",
+                  background: "var(--muted)",
+                  fontFamily: MONO,
+                  fontSize: "0.75rem",
+                  overflowX: "auto",
+                  whiteSpace: "pre",
+                }}
+              >
+                {suggestion}
+              </pre>
+            </details>
+          )}
+          <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
+            {suggestion && (
+              <ReviewButton
+                label="Apply fix"
+                action={props.applyAction}
+                disabled={!actionable}
+                primary
+                resetKey={resetKey}
+              />
+            )}
+            <ReviewButton
+              label="Dismiss"
+              action={props.dismissAction}
+              disabled={!actionable}
+              resetKey={resetKey}
+            />
+          </div>
+        </div>
+      );
+    },
+
+    ReviewSummary: ({ props: rawProps }) => {
+      const props = rawProps as Record<string, any>;
+      const summary = typeof props.summary === "string" ? props.summary : "";
+      const url = typeof props.url === "string" ? props.url : "";
+      const safeUrl = /^https?:\/\//.test(url) ? url : undefined;
+      return (
+        <div
+          style={{
+            border: `1px solid ${c.border}`,
+            borderRadius: "12px",
+            padding: "16px",
+            background: c.card,
+            color: c.cardFg,
+            display: "flex",
+            flexDirection: "column",
+            gap: "8px",
+            boxShadow: c.shadow,
+            width: "100%",
+          }}
+        >
+          <div style={{ fontSize: "1.1rem", fontWeight: 600 }}>
+            {safeUrl ? (
+              <a
+                href={safeUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ color: "inherit", textDecoration: "underline" }}
+              >
+                {props.title}
+              </a>
+            ) : (
+              props.title
+            )}
+          </div>
+          <div style={{ fontSize: "0.8rem", color: c.muted }}>
+            <span style={{ fontFamily: MONO }}>{props.repoRef}</span>
+            {props.author ? ` · by ${props.author}` : ""}
+          </div>
+          <div style={{ display: "flex", gap: "8px" }}>
+            <span style={pillStyle("#fee2e2", "#991b1b")}>{props.high} high</span>
+            <span style={pillStyle("#fef3c7", "#92400e")}>
+              {props.medium} medium
+            </span>
+            <span style={pillStyle("#dbeafe", "#1e40af")}>{props.low} low</span>
+          </div>
+          {summary && (
+            <div
+              style={{
+                fontSize: "0.85rem",
+                lineHeight: 1.5,
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {summary}
+            </div>
+          )}
+          {props.truncated === true && (
+            <div style={{ fontSize: "0.75rem", color: "#92400e" }}>
+              Note: this PR was too large, so the diff was truncated and the
+              review may be incomplete.
+            </div>
+          )}
         </div>
       );
     },
