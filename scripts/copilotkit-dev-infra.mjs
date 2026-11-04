@@ -141,4 +141,30 @@ if (resolveVendorKeyValue(process.env, envFileContent, 'GITHUB_TOKEN') === '') {
   );
 }
 
+// Warn when a configured model (COPILOTKIT_AGENT_MODEL or any per-step *_MODEL) uses a
+// provider whose API key is missing.
+const MODEL_VARS = [
+  'COPILOTKIT_AGENT_MODEL', 'REVIEWER_MODEL', 'LINT_MODEL', 'SECURITY_MODEL',
+  'TESTS_MODEL', 'REGRESSION_MODEL', 'SUMMARY_MODEL', 'CHAT_MODEL',
+];
+const PROVIDER_KEYS = {
+  anthropic: 'ANTHROPIC_API_KEY',
+  google: 'GOOGLE_API_KEY', gemini: 'GOOGLE_API_KEY', 'google-gemini': 'GOOGLE_API_KEY',
+  xai: 'XAI_API_KEY', grok: 'XAI_API_KEY',
+  openai: 'OPENAI_API_KEY',
+};
+const missingProviderKeys = new Map();
+for (const name of MODEL_VARS) {
+  const spec = resolveVendorKeyValue(process.env, envFileContent, name);
+  const provider = spec.split(/[:/]/)[0].toLowerCase();
+  const keyName = PROVIDER_KEYS[provider];
+  if (keyName && resolveVendorKeyValue(process.env, envFileContent, keyName) === '') {
+    missingProviderKeys.set(keyName, [...(missingProviderKeys.get(keyName) ?? []), name]);
+  }
+}
+for (const [keyName, vars] of missingProviderKeys) {
+  if (keyName === 'OPENAI_API_KEY') continue; // already covered by the required-key check above
+  console.warn(`⚠ ${vars.join(', ')} use a model whose provider key ${keyName} is not set — those steps will fail until you set it.`);
+}
+
 process.exit(0);

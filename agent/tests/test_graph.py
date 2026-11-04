@@ -25,7 +25,7 @@ def _pr(number=7, sha="abc", files=None):
     return github.PullRequest(
         owner="o", repo="r", number=number, title=f"PR {number}", author="a", url=URL,
         head_sha=sha, base_ref="main", head_ref="x",
-        files=files if files is not None else [PRF("empty.md", set()), PRF("a.py", {3, 4, 5})],
+        files=files if files is not None else [PRF("empty.md", set()), PRF("a.py", {3, 4, 5, 6})],
     )
 
 
@@ -49,8 +49,10 @@ class FakeReviewer:
     async def ainvoke(self, messages, config=None):
         self.calls.append(messages)
         category = next(c for c in nodes.RUBRICS if nodes.RUBRICS[c][0] in messages[0].content)
-        default_line = {"lint": 3, "security": 4, "tests": 5}[category]
+        default_line = {"lint": 3, "security": 4, "tests": 5, "regression": 6}[category]
         out = self.outputs.get(category, ReviewerOutput(findings=[RF(line=default_line, title=f"{category} finding")]))
+        if self.outputs and category == "regression" and "regression" not in self.outputs:
+            out = ReviewerOutput()  # tests that script reviewers explicitly don't expect a regression finding
         if isinstance(out, Exception):
             raise out
         return out
@@ -69,9 +71,9 @@ class FakeSummary:
 
 @pytest.fixture(autouse=True)
 def fakes(monkeypatch):
-    """Default: one valid finding per category at a.py:3; never hit a real LLM."""
+    """Default: one valid finding per category (a.py lines 3-6); never hit a real LLM."""
     reviewer, summary = FakeReviewer(), FakeSummary()
-    monkeypatch.setattr(nodes, "_reviewer_model", lambda: reviewer)
+    monkeypatch.setattr(nodes, "_reviewer_model", lambda *a: reviewer)
     monkeypatch.setattr(nodes, "_summary_model", lambda: summary)
     return reviewer, summary
 
@@ -91,10 +93,10 @@ class FakeModel:
 async def test_pr_flow(monkeypatch):
     monkeypatch.setattr(github, "fetch_pr", lambda o, r, n: _pr())
     out = await graph.ainvoke({"messages": [HumanMessage(content=f"review {URL}")]}, cfg("t1"))
-    for n in ("fetch_pr", "lint_review", "security_review", "tests_review", "summarize", "render_findings"):
+    for n in ("fetch_pr", "lint_review", "security_review", "tests_review", "regression_review", "summarize", "render_findings"):
         assert out["node_status"][n] == "done"
-    assert sorted(f["id"] for f in out["findings"]) == ["abc-lint-1", "abc-security-1", "abc-tests-1"]
-    assert {f["category"]: f["line"] for f in out["findings"]} == {"lint": 3, "security": 4, "tests": 5}
+    assert sorted(f["id"] for f in out["findings"]) == ["abc-lint-1", "abc-regression-1", "abc-security-1", "abc-tests-1"]
+    assert {f["category"]: f["line"] for f in out["findings"]} == {"lint": 3, "security": 4, "tests": 5, "regression": 6}
     last = out["messages"][-1]
     assert isinstance(last, ToolMessage)
     ops = json.loads(last.content)["a2ui_operations"]
@@ -103,8 +105,8 @@ async def test_pr_flow(monkeypatch):
     comps = next(op["updateComponents"]["components"] for op in ops if "updateComponents" in op)
     assert {c["component"] for c in comps} >= {"FindingCard", "ReviewSummary"}
     data = next(op["updateDataModel"]["value"] for op in ops if "updateDataModel" in op)
-    assert sorted(f["id"] for f in data["findings"]) == ["abc-lint-1", "abc-security-1", "abc-tests-1"]
-    assert sum(data["counts"].values()) == 3
+    assert sorted(f["id"] for f in data["findings"]) == ["abc-lint-1", "abc-regression-1", "abc-security-1", "abc-tests-1"]
+    assert sum(data["counts"].values()) == 4
     assert data["pr"]["ref"] == "o/r#7"
     assert all(isinstance(f["suggestion"], str) for f in data["findings"])
     assert all(op[k].get("surfaceId") == "pr-review-7" for op in ops for k in op if isinstance(op[k], dict))
@@ -274,7 +276,7 @@ async def test_two_prs_same_thread(monkeypatch):
     await graph.ainvoke({"messages": [HumanMessage(content=_url(1))]}, cfg("t5"))
     out = await graph.ainvoke({"messages": [HumanMessage(content=_url(2))]}, cfg("t5"))
     assert out["pr"]["number"] == 2
-    assert {f["id"] for f in out["findings"]} == {"sha2aaa-lint-1", "sha2aaa-security-1", "sha2aaa-tests-1"}
+    assert {f["id"] for f in out["findings"]} == {"sha2aaa-lint-1", "sha2aaa-security-1", "sha2aaa-tests-1", "sha2aaa-regression-1"}
     ops = json.loads(out["messages"][-1].content)["a2ui_operations"]
     assert "sha1aaa" not in json.dumps(ops)
     assert "pr-review-2" in json.dumps(ops)
@@ -405,7 +407,7 @@ DIFF = "@@ -1,3 +1,5 @@\n   1 import os\n   2+x = eval(s)\n   3+y = 1\n   4+z = 
 
 async def _run(monkeypatch, tid, files, outputs=None, summary=None, truncated=False):
     reviewer, summ = FakeReviewer(outputs), summary or FakeSummary()
-    monkeypatch.setattr(nodes, "_reviewer_model", lambda: reviewer)
+    monkeypatch.setattr(nodes, "_reviewer_model", lambda *a: reviewer)
     monkeypatch.setattr(nodes, "_summary_model", lambda: summ)
     pr = _pr(files=files)
     pr.truncated = truncated
@@ -648,20 +650,20 @@ async def test_reviewer_error_isolated(monkeypatch):
 
 async def test_review_errors_reset_on_next_pr(monkeypatch):
     await _run(monkeypatch, "v3", [PRF("a.py", {3})], {"tests": RuntimeError("x")})
-    monkeypatch.setattr(nodes, "_reviewer_model", lambda: FakeReviewer())
+    monkeypatch.setattr(nodes, "_reviewer_model", lambda *a: FakeReviewer())
     out = await graph.ainvoke({"messages": [HumanMessage(content=_url(8))]}, cfg("v3"))
     assert out["review_errors"] == []
     assert "failed" not in out["summary"]
 
 
 async def test_summary_llm_and_fallback(monkeypatch):
-    out, _, summ = await _run(monkeypatch, "v4", [PRF("a.py", {3, 4, 5})])
+    out, _, summ = await _run(monkeypatch, "v4", [PRF("a.py", {3, 4, 5, 6})])
     assert out["summary"].startswith("**Verdict: Approve with nits**\n\n- Request changes: bad stuff")
-    assert "3 finding(s): 0 high, 3 medium, 0 low." in out["summary"]
+    assert "4 finding(s): 0 high, 4 medium, 0 low." in out["summary"]
     assert "lint finding" in summ.calls[0][1].content
 
-    out, _, _ = await _run(monkeypatch, "v5", [PRF("a.py", {3, 4, 5})], summary=FakeSummary(exc=RuntimeError("down")))
-    assert out["summary"] == "**Verdict: Approve with nits**\n\n3 finding(s): 0 high, 3 medium, 0 low."
+    out, _, _ = await _run(monkeypatch, "v5", [PRF("a.py", {3, 4, 5, 6})], summary=FakeSummary(exc=RuntimeError("down")))
+    assert out["summary"] == "**Verdict: Approve with nits**\n\n4 finding(s): 0 high, 4 medium, 0 low."
     assert out["node_status"]["summarize"] == "done"
 
 
@@ -677,7 +679,7 @@ async def test_truncated_note(monkeypatch):
 async def test_prompt_contents(monkeypatch):
     files = [PRF("a.py", {2, 3, 4}, DIFF), PRF("big.bin", set(), "[omitted]")]
     _, reviewer, _ = await _run(monkeypatch, "v8", files)
-    assert len(reviewer.calls) == 3
+    assert len(reviewer.calls) == 4
     system, human = reviewer.calls[0]
     assert "PR title: PR 7" in human.content
     assert "### a.py (modified)" in human.content
@@ -782,3 +784,250 @@ async def test_concurrent_apply_posts_once(monkeypatch):
     texts = [getattr(m, "content", "") for r in (r1, r2) for m in r["messages"]]
     assert any("already being posted" in t for t in texts)
     assert not nodes._IN_FLIGHT
+
+
+# ------------------------------------------------------------ model routing
+
+import asyncio
+
+from src import model as model_mod
+
+_REAL_REVIEWER_MODEL = nodes._reviewer_model  # the autouse fixture replaces nodes._reviewer_model
+
+_ENVS = ("COPILOTKIT_AGENT_MODEL", "REVIEWER_MODEL", "LINT_MODEL", "SECURITY_MODEL",
+         "TESTS_MODEL", "REGRESSION_MODEL", "SUMMARY_MODEL", "CHAT_MODEL", "REVIEWER_BUDGET_SECONDS", "SUMMARY_BUDGET_SECONDS")
+
+
+@pytest.fixture
+def clean_env(monkeypatch):
+    for k in _ENVS:
+        monkeypatch.delenv(k, raising=False)
+    return monkeypatch
+
+
+def test_resolution_order(clean_env):
+    r = model_mod.resolve_model_spec
+    sites = ("lint_review", "security_review", "tests_review", "regression_review", "summarize", "chat")
+    assert all(r(s) == "openai:gpt-5.4" for s in sites)
+    clean_env.setenv("COPILOTKIT_AGENT_MODEL", "google:gemini-2.5-flash")
+    assert all(r(s) == "google:gemini-2.5-flash" for s in sites)
+    clean_env.setenv("REVIEWER_MODEL", "anthropic:claude-sonnet-5-5")
+    assert [r(s) for s in sites] == ["anthropic:claude-sonnet-5-5"] * 4 + ["google:gemini-2.5-flash"] * 2
+    clean_env.setenv("LINT_MODEL", "xai:grok-4")
+    clean_env.setenv("SECURITY_MODEL", "anthropic:claude-opus-5-5")
+    clean_env.setenv("TESTS_MODEL", "grok:grok-4")
+    clean_env.setenv("REGRESSION_MODEL", "google:gemini-2.5-pro")
+    clean_env.setenv("SUMMARY_MODEL", "anthropic:claude-haiku-5-5")
+    clean_env.setenv("CHAT_MODEL", "openai:gpt-5.4-mini")
+    assert [r(s) for s in sites] == [
+        "xai:grok-4", "anthropic:claude-opus-5-5", "grok:grok-4", "google:gemini-2.5-pro",
+        "anthropic:claude-haiku-5-5", "openai:gpt-5.4-mini",
+    ]
+    clean_env.setenv("LINT_MODEL", "  ")  # blank falls through to the group var
+    assert r("lint_review") == "anthropic:claude-sonnet-5-5"
+
+
+def test_invalid_spec_names_env_var(clean_env):
+    clean_env.setenv("SECURITY_MODEL", "nonsense")
+    with pytest.raises(ValueError, match="SECURITY_MODEL"):
+        model_mod.resolve_model_spec("security_review")
+    clean_env.delenv("SECURITY_MODEL")
+    clean_env.setenv("REVIEWER_MODEL", "bad:")
+    with pytest.raises(ValueError, match="REVIEWER_MODEL"):
+        model_mod.resolve_model_spec("lint_review")
+    clean_env.delenv("REVIEWER_MODEL")
+    clean_env.setenv("COPILOTKIT_AGENT_MODEL", "mistral:x")
+    with pytest.raises(ValueError, match="COPILOTKIT_AGENT_MODEL"):
+        model_mod.create_chat_model("openai:gpt-5.4")
+
+
+def test_xai_provider_parse_and_kwargs(clean_env):
+    assert model_mod.parse_agent_model("xai:grok-4") == ("xai", "grok-4")
+    assert model_mod.parse_agent_model("grok/grok-4-fast") == ("xai", "grok-4-fast")
+    clean_env.setenv("XAI_API_KEY", "x")
+    m = model_mod.create_chat_model("xai:grok-4", timeout=7, max_retries=1)
+    assert type(m).__name__ == "ChatXAI" and m.request_timeout == 7 and m.max_retries == 1
+    assert m.model_name == "grok-4"
+
+
+def test_anthropic_no_sampling_params(clean_env):
+    clean_env.setenv("ANTHROPIC_API_KEY", "x")
+    m = model_mod.create_chat_model("anthropic:claude-sonnet-5-5")
+    payload = m._get_request_payload([HumanMessage(content="hi")])
+    assert not {"temperature", "top_p", "top_k"} & payload.keys()
+
+
+@pytest.mark.parametrize("provider,expected", [
+    ("anthropic", {"method": "json_schema"}), ("xai", {"method": "json_schema"}),
+    ("openai", {}), ("google", {}),
+])
+def test_structured_method_per_provider(provider, expected):
+    class Spy:
+        def with_structured_output(self, schema, **kw):
+            self.kw = kw
+            return self
+
+    spy = Spy()
+    assert model_mod.structured(spy, ReviewerOutput, provider) is spy
+    assert spy.kw == expected
+
+
+async def test_reviewer_model_uses_json_schema_for_anthropic(clean_env):
+    from langchain_anthropic import ChatAnthropic
+
+    seen = {}
+    clean_env.setenv("ANTHROPIC_API_KEY", "x")
+    clean_env.setenv("REVIEWER_MODEL", "anthropic:claude-sonnet-5-5")
+    orig = ChatAnthropic.with_structured_output
+
+    def spy(self, schema, **kw):
+        seen.update(kw)
+        return orig(self, schema, **kw)
+
+    clean_env.setattr(ChatAnthropic, "with_structured_output", spy)
+    _REAL_REVIEWER_MODEL("security")
+    assert seen == {"method": "json_schema"}
+
+
+def test_anthropic_output_schema_valid():
+    from langchain_anthropic.chat_models import _convert_to_anthropic_output_config_format as conv
+
+    fmt = conv(ReviewerOutput)
+    assert fmt["type"] == "json_schema"
+    schema = fmt["schema"]
+
+    def walk(node):
+        if isinstance(node, dict):
+            if node.get("type") == "object":
+                assert node.get("additionalProperties") is False
+            for k in ("minimum", "maximum", "minItems", "maxItems", "minLength", "maxLength", "pattern"):
+                assert k not in node
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(schema)
+    item = schema["$defs"]["ReviewerFinding"]
+    assert {"severity", "title", "explanation", "file", "line"} <= set(item["required"])
+    assert "suggestion" not in item["required"]
+    assert {"type": "integer"} in item["properties"]["line"]["anyOf"]
+
+
+async def test_node_models_recorded_and_reset(clean_env):
+    clean_env.setenv("REVIEWER_MODEL", "anthropic:claude-sonnet-5-5")
+    clean_env.setenv("SECURITY_MODEL", "anthropic:claude-opus-5-5")
+    clean_env.setenv("SUMMARY_MODEL", "xai:grok-4")
+    out, _, _ = await _run(clean_env, "nm1", [PRF("a.py", {3, 4, 5})])
+    assert out["node_models"] == {
+        "lint_review": "anthropic:claude-sonnet-5-5", "security_review": "anthropic:claude-opus-5-5",
+        "tests_review": "anthropic:claude-sonnet-5-5", "regression_review": "anthropic:claude-sonnet-5-5",
+        "summarize": "xai:grok-4",
+    }
+    clean_env.delenv("REVIEWER_MODEL")
+    clean_env.delenv("SECURITY_MODEL")
+    clean_env.delenv("SUMMARY_MODEL")
+    clean_env.setattr(nodes, "create_chat_model", lambda *a, **k: FakeModel())
+    out = await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, cfg("nm1"))
+    assert out["node_models"] == {"chat": "openai:gpt-5.4"}
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n: _pr())
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("nm1"))
+    assert "chat" not in out["node_models"]
+    assert out["node_models"]["lint_review"] == "openai:gpt-5.4"
+
+
+class SlowReviewer(FakeReviewer):
+    def __init__(self, slow=("security",), delay=5):
+        super().__init__()
+        self.slow, self.delay = slow, delay
+
+    async def ainvoke(self, messages, config=None):
+        category = next(c for c in nodes.RUBRICS if nodes.RUBRICS[c][0] in messages[0].content)
+        if category in self.slow:
+            await asyncio.sleep(self.delay)
+        return await super().ainvoke(messages, config)
+
+
+async def test_reviewer_timeout(clean_env):
+    clean_env.setenv("REVIEWER_BUDGET_SECONDS", "0.05")
+    slow = SlowReviewer()
+    clean_env.setattr(nodes, "_reviewer_model", lambda *a: slow)
+    clean_env.setattr(nodes, "_summary_model", lambda: FakeSummary())
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n: _pr(files=[PRF("a.py", {3, 4, 5, 6})]))
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("to1"))
+    assert out["node_status"]["security_review"] == "timeout"
+    assert out["node_status"]["lint_review"] == "done" and out["node_status"]["tests_review"] == "done"
+    assert {f["category"] for f in out["findings"]} == {"lint", "tests", "regression"}
+    assert "security reviewer timed out after 0.05s" in out["summary"]
+    assert any("timed out" in e for e in out["review_errors"])
+
+
+async def test_summary_timeout_falls_back(clean_env):
+    clean_env.setenv("SUMMARY_BUDGET_SECONDS", "0.05")
+
+    class SlowSummary(FakeSummary):
+        async def ainvoke(self, messages, config=None):
+            await asyncio.sleep(5)
+
+    out, _, _ = await _run(clean_env, "to2", [PRF("a.py", {3, 4, 5, 6})], summary=SlowSummary())
+    assert out["summary"] == "**Verdict: Approve with nits**\n\n4 finding(s): 0 high, 4 medium, 0 low."
+    assert out["node_status"]["summarize"] == "done"
+
+
+async def test_invalid_model_messages_are_actionable(clean_env):
+    clean_env.setenv("LINT_MODEL", "foo")
+    out, _, _ = await _run(clean_env, "bad1", [PRF("a.py", {3, 4, 5})])
+    # the autouse fake bypasses model construction; exercise the real factory path
+    clean_env.setattr(nodes, "_reviewer_model", _REAL_REVIEWER_MODEL)
+    out = await graph.ainvoke({"messages": [HumanMessage(content=_url(9))]}, cfg("bad2"))
+    assert out["node_status"]["lint_review"] == "error"
+    assert any('LINT_MODEL="foo"' in e for e in out["review_errors"])
+    clean_env.delenv("LINT_MODEL")
+    clean_env.setenv("CHAT_MODEL", "nonsense")
+    out = await graph.ainvoke({"messages": [HumanMessage(content="hi")]}, cfg("bad3"))
+    assert "CHAT_MODEL" in out["messages"][-1].content and out["node_status"] == {"chat": "error"}
+
+
+# ------------------------------------------------------------ regression reviewer
+
+def test_regression_rubric_and_ownership_scoping():
+    assert "regression" in nodes.RUBRICS
+    lint = nodes.RUBRICS["lint"][1]
+    assert "regression reviewer owns" in lint and "breaking-change" in lint
+    tests = nodes.RUBRICS["tests"][1]
+    assert "deleted tests" in tests and "regression reviewer" in tests
+    assert "deleted or disabled tests" not in tests
+    reg = nodes.RUBRICS["regression"][1]
+    assert "may break callers" in reg and "at most 8" in reg
+    assert "Do NOT report security" in reg and "missing tests for new code" in reg
+
+
+async def test_regression_runs_in_parallel_and_is_recorded(clean_env):
+    clean_env.setenv("REGRESSION_MODEL", "anthropic:claude-opus-5-5")
+    clean_env.setenv("REVIEWER_BUDGET_SECONDS", "10")
+    slow = SlowReviewer(slow=("lint", "security", "tests", "regression"), delay=0.3)
+    clean_env.setattr(nodes, "_reviewer_model", lambda *a: slow)
+    clean_env.setattr(nodes, "_summary_model", lambda: FakeSummary())
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n: _pr())
+    started = asyncio.get_event_loop().time()
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("rg1"))
+    assert asyncio.get_event_loop().time() - started < 1.0  # 4 x 0.3s would be >= 1.2s if sequential
+    assert out["node_status"]["regression_review"] == "done"
+    assert out["node_models"]["regression_review"] == "anthropic:claude-opus-5-5"
+    assert any(f["category"] == "regression" and f["line"] == 6 for f in out["findings"])
+
+
+async def test_regression_failure_isolated(monkeypatch):
+    out, _, _ = await _run(monkeypatch, "rg2", [PRF("a.py", {3, 4, 5, 6})], {"regression": RuntimeError("x")})
+    assert out["node_status"]["regression_review"] == "error"
+    assert out["node_status"]["lint_review"] == "done"
+    assert "regression" not in {f["category"] for f in out["findings"]}
+
+
+def test_dedupe_regression_tie_breaks():
+    def f(i, cat, sev="medium"):
+        return {"id": i, "file": "a.py", "line": 1, "category": cat, "severity": sev}
+    assert [k["id"] for k in nodes.dedupe_findings([f("l", "lint"), f("r", "regression")])] == ["r"]
+    assert [k["id"] for k in nodes.dedupe_findings([f("r", "regression"), f("s", "security")])] == ["s"]
+    assert [k["id"] for k in nodes.dedupe_findings([f("r", "regression"), f("t", "tests")])] == ["r"]

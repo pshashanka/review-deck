@@ -1,6 +1,6 @@
 # review-deck
 
-A PR-review agent built on CopilotKit and LangGraph. Paste a GitHub PR URL and three LLM reviewers (lint, security, tests) run in parallel over the line-numbered diff. High-severity findings pause the graph for your approval. Findings then render as cards where you can **Apply fix**, which posts a GitHub `suggestion` review comment, or **Dismiss**. A live graph panel shows which node is running.
+A PR-review agent built on CopilotKit and LangGraph. Paste a GitHub PR URL and four LLM reviewers (lint, security, tests, regression) run in parallel over the line-numbered diff. High-severity findings pause the graph for your approval. Findings then render as cards where you can **Apply fix**, which posts a GitHub `suggestion` review comment, or **Dismiss**. A live graph panel shows which node is running.
 
 ## Architecture
 
@@ -13,9 +13,11 @@ flowchart TD
     B --> L[lint_review]
     B --> S[security_review]
     B --> T[tests_review]
+    B --> X[regression_review]
     L --> G{{"approval_gate<br/>(interrupt on high severity)"}}
     S --> G
     T --> G
+    X --> G
     G --> M[summarize<br/>deterministic verdict]
     M --> R[render_findings]
     H --> R
@@ -46,9 +48,29 @@ Edit `.env`:
 | Variable | Notes |
 | --- | --- |
 | `OPENAI_API_KEY` | Required (for the default model). |
-| `COPILOTKIT_AGENT_MODEL` | Optional, `<provider>:<model>` (openai, anthropic, google). Default `openai:gpt-5.4`. Set the matching provider key for non-OpenAI models. |
+| `COPILOTKIT_AGENT_MODEL` | Optional, `<provider>:<model>` (openai, anthropic, google, xai). Default `openai:gpt-5.4`. Set the matching provider key for non-OpenAI models. See Choosing models. |
 | `GITHUB_TOKEN` | Fine-grained token with Pull requests read/write and Contents read. Needed for private repos and for Apply fix. Public PRs can be reviewed without it, but rate-limited. |
 | `CPK_INTELLIGENCE_API_KEY` etc. | Optional. Enables the CopilotKit Intelligence threads drawer. Without it, an in-memory runner is used. |
+
+## Choosing models
+
+Each LLM step picks its model as `<provider>:<model>`; the first variable that is set wins:
+
+| Step | Resolution order |
+| --- | --- |
+| Lint / Security / Tests / Regression reviewer | `LINT_MODEL` / `SECURITY_MODEL` / `TESTS_MODEL` / `REGRESSION_MODEL`, then `REVIEWER_MODEL`, then `COPILOTKIT_AGENT_MODEL`, then `openai:gpt-5.4` |
+| Summary | `SUMMARY_MODEL`, then `COPILOTKIT_AGENT_MODEL`, then default |
+| Chat | `CHAT_MODEL`, then `COPILOTKIT_AGENT_MODEL`, then default |
+
+Providers: `openai` (`OPENAI_API_KEY`), `anthropic` (`ANTHROPIC_API_KEY`), `google` (`GOOGLE_API_KEY`), `xai` or `grok` (`XAI_API_KEY`). The models actually used are shown per step in the UI. Example mix:
+
+```bash
+SECURITY_MODEL=anthropic:claude-opus-5-5
+REVIEWER_MODEL=anthropic:claude-sonnet-5-5
+SUMMARY_MODEL=anthropic:claude-haiku-5-5
+```
+
+Claude Opus/Sonnet 5.5 always think, so reviews with them are slower. Each reviewer has a time budget (`REVIEWER_BUDGET_SECONDS`, default 90) and the summary has `SUMMARY_BUDGET_SECONDS` (default 45); a reviewer over budget is shown as timed out and noted in the summary, and the others still complete. Pressing Stop cancels the running LLM calls.
 
 ## Run
 

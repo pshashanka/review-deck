@@ -1,7 +1,7 @@
 // Mirrors agent/src/review/state.py (ReviewState) and agent/src/review/models.py (Finding).
 
 export type Severity = "high" | "medium" | "low";
-export type FindingCategory = "lint" | "security" | "tests";
+export type FindingCategory = "lint" | "security" | "tests" | "regression";
 export type FindingStatus =
   | "open"
   | "approved"
@@ -36,7 +36,7 @@ export type PullRequestInfo = {
   truncated?: boolean;
 };
 
-export type NodeStatusValue = "running" | "done" | "error";
+export type NodeStatusValue = "running" | "done" | "error" | "timeout";
 
 export type ReviewState = {
   pr: PullRequestInfo | null;
@@ -45,6 +45,7 @@ export type ReviewState = {
   findings: Finding[];
   summary: string | null;
   node_status: Record<string, NodeStatusValue>;
+  node_models?: Record<string, string>;
   review_errors: string[];
   error: string | null;
 };

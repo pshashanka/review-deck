@@ -36,6 +36,27 @@
   color: var(--card-foreground);
   animation: review-node-pulse 1.4s ease-in-out infinite;
 }
+.review-node[data-status="timeout"] {
+  border-color: #f97316;
+  border-style: dashed;
+  background: color-mix(in srgb, #f97316 12%, var(--card));
+  color: var(--card-foreground);
+}
+.review-node-model {
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--muted-foreground);
+}
+.review-node-note {
+  margin-top: 2px;
+  font-size: 10px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted-foreground);
+}
+.review-node-slow { color: #d97706; }
+.review-node-timeout-note { color: #ea580c; }
 .review-node[data-minor="true"] { opacity: 0.8; font-weight: 500; min-width: 90px; }
 .review-handle { opacity: 0 !important; pointer-events: none; }
 .react-flow__edge.review-edge-running .react-flow__edge-path { stroke: #3b82f6; }

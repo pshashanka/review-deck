@@ -7,7 +7,7 @@ from pydantic import BaseModel, Field
 
 class Finding(BaseModel):
     id: str
-    category: Literal["lint", "security", "tests"]
+    category: Literal["lint", "security", "tests", "regression"]
     severity: Literal["high", "medium", "low"]
     title: str
     explanation: str

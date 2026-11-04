@@ -18,7 +18,7 @@ from fastapi import FastAPI
 import uvicorn
 from src.agent import graph
 from copilotkit import LangGraphAGUIAgent
-from ag_ui_langgraph import add_langgraph_fastapi_endpoint
+from src.endpoint import add_cancellable_endpoint
 
 app = FastAPI()
 
@@ -28,7 +28,7 @@ async def health():
     return {"status": "ok"}
 
 
-add_langgraph_fastapi_endpoint(
+add_cancellable_endpoint(
     app=app,
     agent=LangGraphAGUIAgent(
         name="sample_agent",

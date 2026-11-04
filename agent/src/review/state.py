@@ -48,6 +48,8 @@ class ReviewState(CopilotKitState):
     findings: Annotated[list[dict], merge_findings]
     summary: str | None
     node_status: Annotated[dict[str, str], merge_dict]
+    # node name -> model spec actually used by that LLM node; reset with node_status.
+    node_models: Annotated[dict[str, str], merge_dict]
     error: str | None
     review_errors: Annotated[list[str], merge_errors]
     # Set by handle_action for render_findings (compact per-action surface); cleared there.

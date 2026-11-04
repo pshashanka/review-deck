@@ -4,7 +4,9 @@ import asyncio
 import copy
 import json
 import logging
+import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -17,7 +19,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.types import interrupt
 
 from src import github
-from src.model import create_chat_model
+from src.model import create_chat_model, parse_agent_model, resolve_model_spec, structured
 from src.review.models import Finding, ReviewerFinding, ReviewerOutput
 from src.review.state import RESET, RESET_KEY, ReviewState
 
@@ -76,8 +78,13 @@ def route_intake(state: ReviewState) -> str:
     return "chat"
 
 
-async def _running(state: ReviewState, config: RunnableConfig, node: str, fresh: bool = False) -> None:
-    """Mark ``node`` running and push a snapshot; no-op without a CopilotKit config."""
+async def _running(
+    state: ReviewState, config: RunnableConfig, node: str, fresh: bool = False, model: str | None = None
+) -> None:
+    """Mark ``node`` running and push a snapshot; no-op without a CopilotKit config.
+
+    ``model`` is the resolved model spec of an LLM node; it lands in ``node_models``.
+    """
     snapshot = {
         "pr": state.get("pr"),
         "files": state.get("files", []),
@@ -85,6 +92,9 @@ async def _running(state: ReviewState, config: RunnableConfig, node: str, fresh:
         "summary": state.get("summary"),
         "error": state.get("error"),
         "node_status": {**({} if fresh else state.get("node_status", {})), node: "running"},
+        "node_models": {
+            **({} if fresh else state.get("node_models", {})), **({node: model} if model else {})
+        },
     }
     try:
         await copilotkit_emit_state(config, snapshot)
@@ -96,7 +106,16 @@ async def _running(state: ReviewState, config: RunnableConfig, node: str, fresh:
 
 
 async def chat(state: ReviewState, config: RunnableConfig):
-    await _running(state, config, "chat", fresh=True)
+    try:
+        spec = resolve_model_spec("chat")
+    except ValueError as e:
+        await _running(state, config, "chat", fresh=True)
+        return {
+            "messages": [AIMessage(content=f"I can't answer: the chat model is misconfigured. {e}")],
+            "node_status": {RESET_KEY: True, "chat": "error"},
+            "node_models": {RESET_KEY: True},
+        }
+    await _running(state, config, "chat", fresh=True, model=spec)
     system = (
         "You are a PR review assistant. If the user has not given a GitHub PR URL, "
         "ask them for one. Otherwise answer briefly about the current review."
@@ -107,7 +126,7 @@ async def chat(state: ReviewState, config: RunnableConfig):
             f"\nCurrent review of PR #{state['pr']['number']} '{state['pr']['title']}'."
             f"\nSummary: {state.get('summary')}\nFindings: {titles or 'none'}"
         )
-    model = create_chat_model("openai:gpt-5.4")
+    model = create_chat_model("openai:gpt-5.4", site="chat")
     # Drop tool traffic (A2UI JSON, log_a2ui_event pairs); the system prompt carries the review.
     history = [
         m for m in state["messages"]
@@ -117,6 +136,7 @@ async def chat(state: ReviewState, config: RunnableConfig):
     return {
         "messages": [AIMessage(content=reply.content)],
         "node_status": {RESET_KEY: True, "chat": "done"},
+        "node_models": {RESET_KEY: True, "chat": spec},
     }
 
 
@@ -134,7 +154,8 @@ async def fetch_pr(state: ReviewState, config: RunnableConfig):
         pr = github.fetch_pr(*parsed)
     except (github.GitHubError, ValueError) as e:
         msg = e.message if isinstance(e, github.GitHubError) else str(e)
-        return {"error": msg, "node_status": {RESET_KEY: True, "fetch_pr": "error"}}
+        return {"error": msg, "node_status": {RESET_KEY: True, "fetch_pr": "error"},
+                "node_models": {RESET_KEY: True}}
     return {
         "error": None,
         "review_errors": [RESET_KEY],
@@ -150,13 +171,14 @@ async def fetch_pr(state: ReviewState, config: RunnableConfig):
             for f in pr.files
         ],
         "node_status": {RESET_KEY: True, "fetch_pr": "done"},
+        "node_models": {RESET_KEY: True},
     }
 
 
 def after_fetch(state: ReviewState) -> list[str]:
     if state.get("error"):
         return ["fetch_error"]
-    return ["lint_review", "security_review", "tests_review"]
+    return ["lint_review", "security_review", "tests_review", "regression_review"]
 
 
 async def fetch_error(state: ReviewState, config: RunnableConfig):
@@ -208,6 +230,8 @@ RUBRICS: dict[str, tuple[str, str]] = {
         "Flag: correctness bugs, missing or wrong error handling, dead or unreachable code, misleading names or "
         "readability problems that genuinely matter, and obvious performance problems. Do NOT flag formatting, "
         "import order, quote style or other nits a formatter or linter would fix automatically. "
+        "Do NOT report backward-compatibility or breaking-change issues (removed or renamed public APIs, changed "
+        "signatures or defaults, altered behavior of existing callers); a regression reviewer owns those. "
         "Do NOT report security issues (secrets, injection, authn/authz, unsafe eval, TLS, sensitive logging); "
         "a security reviewer owns those. Do NOT report missing or weak tests; a tests reviewer owns that.",
     ),
@@ -221,22 +245,68 @@ RUBRICS: dict[str, tuple[str, str]] = {
     ),
     "tests": (
         "Your focus is test coverage and test quality.",
-        "Flag: changed or new logic that lacks tests, weak or tautological assertions, deleted or disabled tests, "
-        "and missing edge cases. For missing coverage, cite the changed code line that needs a test. "
+        "Flag: new or changed logic that lacks tests, weak or tautological assertions, and missing edge cases. For missing coverage, cite the changed code line that needs a test. "
         "Do NOT report code quality, bugs or security issues in the code itself; lint and security reviewers "
-        "own those.",
+        "own those. Do NOT report deleted tests or removed coverage of existing behavior; a regression reviewer "
+        "owns those.",
+    ),
+    "regression": (
+        "Your focus is regressions: changes that may break existing callers, data or behavior.",
+        "You only see the diff, not the callers, so frame findings as \"may break callers that ...\" and prefer "
+        "changes to existing code (context and removed lines) over brand-new code. Flag: "
+        "(1) breaking API changes: removed or renamed public functions, classes, methods, parameters, endpoints, "
+        "exports, CLI flags, env vars or config keys; "
+        "(2) changed signatures, return types or shapes, raised exceptions, or defaults that existing callers may "
+        "rely on; "
+        "(3) altered behavior of existing code paths: changed conditions, removed branches, reordered side "
+        "effects, changed error-handling semantics; "
+        "(4) data compatibility: schema, migration, serialization or wire-format changes that break existing data "
+        "or clients; "
+        "(5) removed functionality, or deleted tests that covered existing behavior. "
+        "Cite the changed line (the added replacement or nearest numbered context line, never a removed line). "
+        "Severity for this review: high = will break existing callers or data in common use; medium = likely "
+        "breaks some callers or is a subtle behavior change; low = possible edge-case change. "
+        "Prefer precision over recall; report at most 8 findings. "
+        "Do NOT report security issues, style or readability, or missing tests for new code; other reviewers own "
+        "those.",
     ),
 }
 
 
-def _reviewer_model():
-    """Structured-output model for reviewers (module-level so tests can monkeypatch it)."""
-    return create_chat_model("openai:gpt-5.4", timeout=60, max_retries=2).with_structured_output(ReviewerOutput)
+def _reviewer_model(category: str):
+    """Structured-output model for one reviewer (module-level so tests can monkeypatch it)."""
+    site = f"{category}_review"
+    provider, _ = parse_agent_model(resolve_model_spec(site), site)
+    model = create_chat_model("openai:gpt-5.4", timeout=60, max_retries=2, site=site)
+    return structured(model, ReviewerOutput, provider)
 
 
 def _summary_model():
     """Plain chat model for the summary (module-level so tests can monkeypatch it)."""
-    return create_chat_model("openai:gpt-5.4", timeout=30, max_retries=2)
+    return create_chat_model("openai:gpt-5.4", timeout=30, max_retries=2, site="summarize")
+
+
+def _budget(env: str, default: float) -> float:
+    try:
+        value = float(os.getenv(env) or default)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+def reviewer_budget_s() -> float:
+    return _budget("REVIEWER_BUDGET_SECONDS", 90.0)
+
+
+def summary_budget_s() -> float:
+    return _budget("SUMMARY_BUDGET_SECONDS", 45.0)
+
+
+def _safe_spec(site: str) -> str | None:
+    try:
+        return resolve_model_spec(site)
+    except ValueError:
+        return None  # surfaced as a node error when the model is built
 
 
 def _sha7(state: ReviewState) -> str:
@@ -328,26 +398,40 @@ def validate_findings(
 
 async def _run_reviewer(state: ReviewState, config: RunnableConfig, category: str):
     node = f"{category}_review"
-    await _running(state, config, node)
+    spec = _safe_spec(node)
+    await _running(state, config, node, model=spec)
     prompt, reviewable = build_diff_prompt(state)
+    models = {node: spec} if spec else {}
     if not reviewable:
-        return {"node_status": {node: "done"}}
+        return {"node_status": {node: "done"}, "node_models": models}
     focus, rubric = RUBRICS[category]
     system = _SHARED_RULES.format(
         focus=focus, rubric=rubric, annotation_help=_ANNOTATION_HELP, max_findings=MAX_FINDINGS
     )
+    budget = reviewer_budget_s()
+    started = time.monotonic()
     try:
-        result = await _reviewer_model().ainvoke(
-            [SystemMessage(content=system), HumanMessage(content=prompt)]
+        result = await asyncio.wait_for(
+            _reviewer_model(category).ainvoke(
+                [SystemMessage(content=system), HumanMessage(content=prompt)]
+            ),
+            budget,
         )
         if isinstance(result, dict):
             result = ReviewerOutput.model_validate(result)
         findings = validate_findings(result.findings, state.get("files", []), category, _sha7(state))
+    except asyncio.TimeoutError:
+        logger.warning("%s reviewer (%s) timed out after %.1fs", category, spec, budget)
+        note = f"{category} reviewer timed out after {budget:g}s; its findings are missing."
+        return {"review_errors": [note], "node_status": {node: "timeout"}, "node_models": models}
     except Exception as e:  # one reviewer failing must not fail the run
         logger.warning("%s reviewer failed: %s", category, e, exc_info=True)
-        note = f"{category} reviewer failed ({type(e).__name__}); its findings are missing."
-        return {"review_errors": [note], "node_status": {node: "error"}}
-    return {"findings": findings, "node_status": {node: "done"}}
+        detail = f": {e}" if isinstance(e, ValueError) and "_MODEL" in str(e) else ""
+        note = f"{category} reviewer failed ({type(e).__name__}{detail}); its findings are missing."
+        return {"review_errors": [note], "node_status": {node: "error"}, "node_models": models}
+    logger.info("%s reviewer (%s) finished in %.1fs: %d finding(s)", category, spec,
+                time.monotonic() - started, len(findings))
+    return {"findings": findings, "node_status": {node: "done"}, "node_models": models}
 
 
 async def lint_review(state: ReviewState, config: RunnableConfig):
@@ -362,6 +446,10 @@ async def tests_review(state: ReviewState, config: RunnableConfig):
     return await _run_reviewer(state, config, "tests")
 
 
+async def regression_review(state: ReviewState, config: RunnableConfig):
+    return await _run_reviewer(state, config, "regression")
+
+
 _SUMMARY_SYSTEM = (
     "You write the supporting bullets for a pull request review summary. The overall verdict is already "
     "decided by the system and is given to you; do not restate or change it. Output 2-4 terse markdown "
@@ -371,11 +459,11 @@ _SUMMARY_SYSTEM = (
 )
 
 _SEVERITY_RANK = {"high": 3, "medium": 2, "low": 1}
-_CATEGORY_RANK = {"security": 3, "lint": 2, "tests": 1}
+_CATEGORY_RANK = {"security": 4, "regression": 3, "lint": 2, "tests": 1}
 
 
 def dedupe_findings(findings: list[dict]) -> list[dict]:
-    """At most one finding per (file, line): highest severity wins, tie-break security > lint > tests."""
+    """At most one finding per (file, line): highest severity wins, tie-break security > regression > lint > tests."""
     best: dict[tuple, dict] = {}
     for f in findings:
         key = (f["file"], f["line"])
@@ -449,13 +537,16 @@ async def approval_gate(state: ReviewState, config: RunnableConfig):
 
 
 async def summarize(state: ReviewState, config: RunnableConfig):
-    await _running(state, config, "summarize")
+    spec = _safe_spec("summarize")
+    await _running(state, config, "summarize", model=spec)
     all_findings = state.get("findings", [])
     findings = [f for f in all_findings if f.get("status") != "rejected"]
     rejected = len(all_findings) - len(findings)
     errors = state.get("review_errors", [])
     pr = state.get("pr") or {}
-    update: dict[str, Any] = {"node_status": {"summarize": "done"}}
+    update: dict[str, Any] = {
+        "node_status": {"summarize": "done"}, "node_models": {"summarize": spec} if spec else {},
+    }
     counts = {s: sum(1 for f in findings if f["severity"] == s) for s in ("high", "medium", "low")}
     if not findings and not errors:
         reviewable = any(f["valid_lines"] for f in state.get("files", []))
@@ -477,15 +568,23 @@ async def summarize(state: ReviewState, config: RunnableConfig):
             f"- [{f['severity']}/{f['category']}] {f['title']} ({f['file']}:{f['line']}): {f['explanation']}"
             for f in findings
         )
+        started = time.monotonic()
         try:
-            reply = await _summary_model().ainvoke([
-                SystemMessage(content=_SUMMARY_SYSTEM),
-                HumanMessage(content=(
-                    f"Verdict (fixed): {verdict}\n\n<pr_title>{pr.get('title', '')}</pr_title>\n\n"
-                    f"<findings>\n{listing}\n</findings>"
-                )),
-            ])
+            reply = await asyncio.wait_for(
+                _summary_model().ainvoke([
+                    SystemMessage(content=_SUMMARY_SYSTEM),
+                    HumanMessage(content=(
+                        f"Verdict (fixed): {verdict}\n\n<pr_title>{pr.get('title', '')}</pr_title>\n\n"
+                        f"<findings>\n{listing}\n</findings>"
+                    )),
+                ]),
+                summary_budget_s(),
+            )
             body = _text(reply).strip()
+            logger.info("summary (%s) finished in %.1fs", spec, time.monotonic() - started)
+        except asyncio.TimeoutError:
+            logger.warning("summary LLM timed out after %.1fs, using deterministic summary",
+                           summary_budget_s())
         except Exception as e:
             logger.warning("summary LLM failed, using deterministic summary: %s", e)
     parts = [f"**Verdict: {verdict}**"]
@@ -558,7 +657,9 @@ async def handle_action(state: ReviewState, config: RunnableConfig):
     done = {RESET_KEY: True, "handle_action": "done"}
 
     def reply(text: str, finding: dict | None = None):
-        out: dict[str, Any] = {"messages": [AIMessage(content=text)], "node_status": done}
+        out: dict[str, Any] = {
+            "messages": [AIMessage(content=text)], "node_status": done, "node_models": {RESET_KEY: True},
+        }
         if finding is not None:
             out["findings"] = [finding]
             out["action"] = {"finding_id": finding["id"], "note": text,
