@@ -34,6 +34,14 @@ def merge_dict(left: dict | None, right: dict | None) -> dict:
     return {**(left or {}), **right}
 
 
+def merge_errors(left: list[str] | None, right: list[str] | None) -> list[str]:
+    """Append notes; a leading ``RESET_KEY`` entry in ``right`` discards ``left`` first."""
+    right = list(right or [])
+    if right and right[0] == RESET_KEY:
+        left, right = [], right[1:]
+    return [*(left or []), *right]
+
+
 class ReviewState(CopilotKitState):
     pr: dict[str, Any] | None
     files: list[dict]
@@ -41,3 +49,4 @@ class ReviewState(CopilotKitState):
     summary: str | None
     node_status: Annotated[dict[str, str], merge_dict]
     error: str | None
+    review_errors: Annotated[list[str], merge_errors]

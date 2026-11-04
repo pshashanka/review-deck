@@ -42,17 +42,29 @@ def parse_agent_model(value: str) -> tuple[str, str]:
     return provider, match.group(2)
 
 
-def create_chat_model(default_spec: str, **openai_kwargs) -> BaseChatModel:
+def create_chat_model(
+    default_spec: str,
+    *,
+    timeout: float | None = None,
+    max_retries: int | None = None,
+    **openai_kwargs,
+) -> BaseChatModel:
     """Build this site's chat model.
 
     Args:
         default_spec: This site's default, e.g. ``"openai:gpt-5.4"``.
+        timeout: Request timeout in seconds (all providers).
+        max_retries: Client retry count (all providers).
         **openai_kwargs: Extra ChatOpenAI options, applied only for OpenAI.
     """
     provider, model = parse_agent_model(
         (os.getenv("COPILOTKIT_AGENT_MODEL") or "").strip() or default_spec
     )
-    kwargs = openai_kwargs if provider == "openai" else {}
+    kwargs = dict(openai_kwargs) if provider == "openai" else {}
+    if timeout is not None:
+        kwargs["timeout"] = timeout
+    if max_retries is not None:
+        kwargs["max_retries"] = max_retries
     return init_chat_model(
         model, model_provider=_LANGCHAIN_PROVIDERS[provider], **kwargs
     )
