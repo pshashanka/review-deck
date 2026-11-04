@@ -50,6 +50,11 @@ class ReviewState(CopilotKitState):
     node_status: Annotated[dict[str, str], merge_dict]
     # node name -> model spec actually used by that LLM node; reset with node_status.
     node_models: Annotated[dict[str, str], merge_dict]
+    # node name -> {input_tokens, output_tokens, cached_tokens, cost_usd|None, files?}; reset with node_status.
+    node_usage: Annotated[dict[str, dict], merge_dict]
+    # Totals for the review, set by summarize and cleared by fetch_pr:
+    # {input_tokens, output_tokens, cached_tokens, cost_usd|None, skipped_files, files_total}.
+    review_stats: dict[str, Any] | None
     error: str | None
     review_errors: Annotated[list[str], merge_errors]
     # Set by handle_action for render_findings (compact per-action surface); cleared there.

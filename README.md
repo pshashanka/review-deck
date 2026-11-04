@@ -1,6 +1,6 @@
 # review-deck
 
-A PR-review agent built on CopilotKit and LangGraph. Paste a GitHub PR URL and four LLM reviewers (lint, security, tests, regression) run in parallel over the line-numbered diff. High-severity findings pause the graph for your approval. Findings then render as cards where you can **Apply fix**, which posts a GitHub `suggestion` review comment, or **Dismiss**. A live graph panel shows which node is running.
+A PR-review agent built on CopilotKit and LangGraph. Paste a GitHub PR URL and three LLM reviewers (security, tests, correctness) run in parallel over the line-numbered diff. Style and lint are left to free static tools in CI (ruff, eslint, etc.). High-severity findings pause the graph for your approval. Findings then render as cards where you can **Apply fix**, which posts a GitHub `suggestion` review comment, or **Dismiss**. A live graph panel shows which node is running.
 
 ## Architecture
 
@@ -10,12 +10,10 @@ flowchart TD
     A -->|button click| H[handle_action]
     A -->|other chat| C[chat]
     B -->|fetch failed| E[fetch_error]
-    B --> L[lint_review]
     B --> S[security_review]
     B --> T[tests_review]
-    B --> X[regression_review]
-    L --> G{{"approval_gate<br/>(interrupt on high severity)"}}
-    S --> G
+    B --> X[correctness_review]
+    S --> G{{"approval_gate<br/>(interrupt on high severity)"}}
     T --> G
     X --> G
     G --> M[summarize<br/>verdict computed in code]
@@ -70,9 +68,11 @@ Each LLM step picks its model as `<provider>:<model>`; the first variable that i
 
 | Step | Resolution order |
 | --- | --- |
-| Lint / Security / Tests / Regression reviewer | `LINT_MODEL` / `SECURITY_MODEL` / `TESTS_MODEL` / `REGRESSION_MODEL`, then `REVIEWER_MODEL`, then `COPILOTKIT_AGENT_MODEL`, then `openai:gpt-5.4` |
+| Security / Tests / Correctness reviewer | `SECURITY_MODEL` / `TESTS_MODEL` / `CORRECTNESS_MODEL`, then `REVIEWER_MODEL`, then `COPILOTKIT_AGENT_MODEL`, then `openai:gpt-5.4` |
 | Summary | `SUMMARY_MODEL`, then `COPILOTKIT_AGENT_MODEL`, then default |
 | Chat | `CHAT_MODEL`, then `COPILOTKIT_AGENT_MODEL`, then default |
+
+`REGRESSION_MODEL` still works as a deprecated alias of `CORRECTNESS_MODEL` (the regression reviewer was merged into correctness) and logs a one-time warning. `LINT_MODEL` is no longer read (the lint reviewer was removed) and logs a one-time warning if set.
 
 Providers: `openai` (`OPENAI_API_KEY`), `anthropic` (`ANTHROPIC_API_KEY`), `google` (`GOOGLE_API_KEY`), `xai` or `grok` (`XAI_API_KEY`). The models actually used are shown per step in the UI. Example mix:
 
@@ -83,6 +83,21 @@ SUMMARY_MODEL=anthropic:claude-haiku-5-5
 ```
 
 Claude Opus/Sonnet 5.5 always think, so reviews with them are slower. Each reviewer has a time budget (`REVIEWER_BUDGET_SECONDS`, default 90) and the summary has `SUMMARY_BUDGET_SECONDS` (default 45); a reviewer over budget is shown as timed out and noted in the summary, and the others still complete. A summary over budget falls back to a deterministic summary. Pressing Stop disconnects the client, which cancels the running graph (and its LLM calls).
+
+## Token usage and cost
+
+Every LLM node (the three reviewers, summary and chat) records its token usage, and the graph panel shows it per node: input, output and cached tokens, plus how many files each reviewer received. The summary step also computes totals for the whole review.
+
+- Tokens come from the provider's usage metadata (reviewers use structured output with `include_raw=True`, so the same code works for OpenAI, Anthropic, Google and xAI). A provider that reports no usage shows zeros.
+- Cost is shown only for models with a known price. Built in (USD per 1M tokens, input / output / cache read): `claude-opus-5-5` 4 / 20 / 0.20, `claude-sonnet-5-5` 2 / 10 / 0.20, `claude-haiku-5-5` 0.10 / 0.50 (cached tokens at the input price). Any other model has no cost (shown as unknown, and the review total is unknown too) unless you supply prices:
+
+```bash
+MODEL_PRICES='{"openai:gpt-5.4": {"input": 2.5, "output": 15, "cache_read": 0.25}}'
+```
+
+  Values are USD per 1M tokens (`cache_read` optional; cached tokens are billed at it, else at `input`). `MODEL_PRICES` also overrides the built-in table.
+- If a reviewer fails to parse its output, the tokens it spent are still counted. If a reviewer times out or errors without usage, its tokens are unknown, so the review totals are marked `partial` (the totals may be understated).
+- Per-node usage is logged at info level. Cost is an estimate from list prices and ignores cache-write surcharges.
 
 ## Run
 
@@ -107,20 +122,22 @@ UI at http://localhost:3000, agent at http://localhost:8123. Startup prints warn
 
 ## What each reviewer checks
 
-Four reviewers run in parallel, each with its own rubric (`RUBRICS` in `agent/src/review/nodes.py`) and explicit ownership boundaries:
+Three reviewers run in parallel, each with its own rubric (`RUBRICS` in `agent/src/review/nodes.py`) and explicit ownership boundaries. There is no lint reviewer: formatting, naming, import order and dead-code nits are left to linters in CI such as ruff or eslint.
 
 | Reviewer | Checks | Does not report (owner) |
 | --- | --- | --- |
-| lint | Correctness bugs, missing/wrong error handling, dead code, misleading names, obvious performance problems | Formatter nits; breaking changes (regression); security; missing tests (tests) |
-| security | Injection, secrets, missing authn/authz, unsafe deserialization/eval, SSRF, insecure crypto/TLS, sensitive logging. High only for exploitable issues or credential exposure | General bugs/quality (lint); missing tests (tests) |
-| tests | New/changed logic without tests, weak or tautological assertions, missing edge cases | Code quality/bugs/security (lint, security); deleted tests (regression) |
-| regression | Breaking API/signature/default changes, altered behavior of existing paths, data/schema/wire compatibility, removed functionality or deleted tests. Phrased as "may break callers that ..." | Security, style, missing tests for new code |
+| security | Injection, secrets, missing authn/authz, unsafe deserialization/eval, SSRF, insecure crypto/TLS, sensitive logging. High only for exploitable issues or credential exposure | General bugs and breaking changes (correctness); missing tests (tests) |
+| tests | New/changed logic without tests, weak or tautological assertions, missing edge cases | Bugs and breaking changes (correctness); security; deleted tests (correctness) |
+| correctness | Logic bugs in new or changed code (wrong conditions, off-by-one, null/None handling, division by zero, missing or wrong error handling, resource leaks, obvious performance traps) and breaking changes to existing behavior (API/signature/default changes, altered behavior of existing paths, data/schema/wire compatibility, removed functionality or deleted tests, phrased as "may break callers that ...") | Style/naming/formatting/dead code (linters); security; missing tests for new code |
 
 ## How findings are produced
 
+- Noise files are skipped before any prompt is built and are not counted against the diff size caps. Skipped: lockfiles (`package-lock.json`, `yarn.lock`, `pnpm-lock.yaml`, `npm-shrinkwrap.json`, `uv.lock`, `poetry.lock`, `Pipfile.lock`, `Cargo.lock`, `Gemfile.lock`, `composer.lock`, `go.sum`), minified/bundled files (`*.min.js`, `*.min.css`, `*.map`), `*.snap`, `*_pb2.py`, `*.pb.go`, `*.generated.*`, anything under `node_modules/` or `__snapshots__/` at any depth, anything under `dist/`, `build/`, `out/`, `coverage/`, `target/`, `.next/` or `vendor/` only when that is the first path segment (so `src/build/compiler.ts` or `app/vendor/client.py` are still reviewed), and test baselines: `.js/.json/.txt/.snap/.d.ts/...` files under a `baselines/` directory whose parent is a test directory (`tests/baselines/reference/...`, `tsc/testdata/baselines/...`). A directory name alone never hides source, config or script files (`__fixtures__/` is not skipped). Add your own with `REVIEW_IGNORE`, comma-separated `fnmatch` globs matched against the full path and the file name (for example `REVIEW_IGNORE='src/gen/*,*.pb.ts'`). Skipped files are listed in the review stats and the summary notes `Skipped N files (lock/generated/vendor): ...` (names capped).
+- Lockfile contents are never sent, but the security reviewer gets a one-line stub per changed lockfile, e.g. `package-lock.json changed (+120/-34 lines) - content omitted; flag only if other changes suggest dependency risk`, using GitHub's additions/deletions.
+- Each reviewer gets only the files it needs (`agent/src/review/files.py`), which cuts input tokens versus sending the whole diff to all of them. Files are classified by path: tests (`test_*.py`, `*_test.py`, `*.test.ts(x)`, `*.spec.ts(x)`, `tests/`, `test/`, `__tests__/`), docs (`.md`, `.rst`, `.txt`, `docs/`), config (yaml, toml, json, ini, `requirements*.txt`, `constraints*.txt`, `.env*`, Dockerfile, Makefile, `.github/`), everything else is source. security sees source, test, config and docs; tests sees source, test and config (config such as `pytest.ini`, `tox.ini`, `package.json` and CI workflows changes how tests run, and is small); correctness sees source, test and config. Docs are only seen by security. Files outside a reviewer's slice are listed by name (up to 10) without content as "not in your scope". A reviewer with nothing in its slice makes no LLM call. Findings that cite a file outside the reviewer's slice are dropped.
 - Each file's patch is annotated with new-file line numbers (added `12+text`, context ` 375 text`, removed lines unnumbered). Only added and context lines are commentable.
 - `validate_findings` keeps at most 8 findings per reviewer and requires a commentable line. A cited line within 2 lines of a commentable one is snapped to it (and the suggestion cleared); farther lines are dropped. Findings for unknown files are dropped, paths are normalized (`./`, `a/`, `b/`), and multi-line or no-op suggestions are cleared.
-- `dedupe_findings` keeps one finding per `file:line`: highest severity wins, ties go to security > regression > lint > tests.
+- `dedupe_findings` keeps one finding per `file:line`: highest severity wins, ties go to security > correctness > tests.
 - Any open high-severity finding pauses the graph with an approval interrupt (`approval_gate`).
 - The verdict is computed in code (`verdict_for`), not by the LLM: any high is **Request changes**; otherwise any finding is **Approve with nits**; no findings is **Approve**. The summary LLM only writes the supporting bullets.
 - Diff size caps (`agent/src/github.py`): patches over 20,000 chars are omitted per file, total patch text is capped at 60,000 chars (later files omitted, PR marked truncated), and at most 40 pages of 100 files are fetched. Omitted files are not reviewed.
@@ -174,7 +191,7 @@ npm run build                    # stop the dev server first; build writes .next
 
 - State is checkpointed in a single in-memory `MemorySaver`. Restarting the agent loses threads and pending approvals.
 - Reviews vary from run to run because they come from LLMs.
-- The regression reviewer sees only the diff, not callers elsewhere in the repo.
+- The correctness reviewer sees only the diff, not callers elsewhere in the repo.
 - Diffs are capped (20,000 chars per file, 60,000 total); files beyond that are not reviewed.
 - Suggestions are single-line replacements.
 - After Apply fix or Dismiss, the result re-renders as a new compact card rather than updating the card in place.

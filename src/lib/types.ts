@@ -1,7 +1,7 @@
 // Mirrors agent/src/review/state.py (ReviewState) and agent/src/review/models.py (Finding).
 
 export type Severity = "high" | "medium" | "low";
-export type FindingCategory = "lint" | "security" | "tests" | "regression";
+export type FindingCategory = "security" | "tests" | "correctness";
 export type FindingStatus =
   | "open"
   | "approved"
@@ -38,6 +38,24 @@ export type PullRequestInfo = {
 
 export type NodeStatusValue = "running" | "done" | "error" | "timeout";
 
+export type NodeUsage = {
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  cost_usd: number | null;
+  files?: number;
+};
+
+export type ReviewStats = {
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  cost_usd: number | null;
+  skipped_files: string[];
+  partial?: boolean;
+  files_total: number;
+};
+
 export type ReviewState = {
   pr: PullRequestInfo | null;
   // Present in the graph state; large (annotated diffs), rarely needed by the UI.
@@ -46,6 +64,8 @@ export type ReviewState = {
   summary: string | null;
   node_status: Record<string, NodeStatusValue>;
   node_models?: Record<string, string>;
+  node_usage?: Record<string, NodeUsage>;
+  review_stats?: ReviewStats | null;
   review_errors: string[];
   error: string | null;
 };

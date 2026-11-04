@@ -49,10 +49,8 @@ class FakeReviewer:
     async def ainvoke(self, messages, config=None):
         self.calls.append(messages)
         category = next(c for c in nodes.RUBRICS if nodes.RUBRICS[c][0] in messages[0].content)
-        default_line = {"lint": 3, "security": 4, "tests": 5, "regression": 6}[category]
+        default_line = {"security": 4, "tests": 5, "correctness": 6}[category]
         out = self.outputs.get(category, ReviewerOutput(findings=[RF(line=default_line, title=f"{category} finding")]))
-        if self.outputs and category == "regression" and "regression" not in self.outputs:
-            out = ReviewerOutput()  # tests that script reviewers explicitly don't expect a regression finding
         if isinstance(out, Exception):
             raise out
         return out
@@ -91,12 +89,12 @@ class FakeModel:
 
 
 async def test_pr_flow(monkeypatch):
-    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n: _pr())
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr())
     out = await graph.ainvoke({"messages": [HumanMessage(content=f"review {URL}")]}, cfg("t1"))
-    for n in ("fetch_pr", "lint_review", "security_review", "tests_review", "regression_review", "summarize", "render_findings"):
+    for n in ("fetch_pr", "security_review", "tests_review", "correctness_review", "summarize", "render_findings"):
         assert out["node_status"][n] == "done"
-    assert sorted(f["id"] for f in out["findings"]) == ["abc-lint-1", "abc-regression-1", "abc-security-1", "abc-tests-1"]
-    assert {f["category"]: f["line"] for f in out["findings"]} == {"lint": 3, "security": 4, "tests": 5, "regression": 6}
+    assert sorted(f["id"] for f in out["findings"]) == ["abc-correctness-1", "abc-security-1", "abc-tests-1"]
+    assert {f["category"]: f["line"] for f in out["findings"]} == {"security": 4, "tests": 5, "correctness": 6}
     last = out["messages"][-1]
     assert isinstance(last, ToolMessage)
     ops = json.loads(last.content)["a2ui_operations"]
@@ -105,8 +103,8 @@ async def test_pr_flow(monkeypatch):
     comps = next(op["updateComponents"]["components"] for op in ops if "updateComponents" in op)
     assert {c["component"] for c in comps} >= {"FindingCard", "ReviewSummary"}
     data = next(op["updateDataModel"]["value"] for op in ops if "updateDataModel" in op)
-    assert sorted(f["id"] for f in data["findings"]) == ["abc-lint-1", "abc-regression-1", "abc-security-1", "abc-tests-1"]
-    assert sum(data["counts"].values()) == 4
+    assert sorted(f["id"] for f in data["findings"]) == ["abc-correctness-1", "abc-security-1", "abc-tests-1"]
+    assert sum(data["counts"].values()) == 3
     assert data["pr"]["ref"] == "o/r#7"
     assert all(isinstance(f["suggestion"], str) for f in data["findings"])
     assert all(op[k].get("surfaceId") == "pr-review-7" for op in ops for k in op if isinstance(op[k], dict))
@@ -120,14 +118,14 @@ async def test_chat(monkeypatch):
 
 
 async def test_github_error(monkeypatch):
-    def boom(o, r, n):
+    def boom(o, r, n, **kw):
         raise github.GitHubError("PR not found", 404)
 
     monkeypatch.setattr(github, "fetch_pr", boom)
     out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("t3"))
     assert "PR not found" in out["messages"][-1].content
     assert out["error"] == "PR not found"
-    assert "lint_review" not in out["node_status"]
+    assert "correctness_review" not in out["node_status"]
 
 
 async def test_action_routes_to_handle_action():
@@ -151,10 +149,10 @@ def _act(name, fid):
 
 
 async def _reviewed(monkeypatch, tid, suggestion="x = 1"):
-    outputs = {"lint": ReviewerOutput(findings=[RF(line=3, suggestion=suggestion)])}
+    outputs = {"correctness": ReviewerOutput(findings=[RF(line=3, suggestion=suggestion)])}
     out, *_ = await _run(
         monkeypatch, tid, [PRF("a.py", {3, 4, 5}, "   3+x = 0\n   4+y\n   5+z")],
-        outputs={"lint": outputs["lint"], "security": ReviewerOutput(), "tests": ReviewerOutput()},
+        outputs={"correctness": outputs["correctness"], "security": ReviewerOutput(), "tests": ReviewerOutput()},
     )
     return out["findings"][0]
 
@@ -272,18 +270,18 @@ def _url(n):
 
 
 async def test_two_prs_same_thread(monkeypatch):
-    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n: _pr(n, sha=f"sha{n}aaaa"))
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr(n, sha=f"sha{n}aaaa"))
     await graph.ainvoke({"messages": [HumanMessage(content=_url(1))]}, cfg("t5"))
     out = await graph.ainvoke({"messages": [HumanMessage(content=_url(2))]}, cfg("t5"))
     assert out["pr"]["number"] == 2
-    assert {f["id"] for f in out["findings"]} == {"sha2aaa-lint-1", "sha2aaa-security-1", "sha2aaa-tests-1", "sha2aaa-regression-1"}
+    assert {f["id"] for f in out["findings"]} == {"sha2aaa-correctness-1", "sha2aaa-security-1", "sha2aaa-tests-1"}
     ops = json.loads(out["messages"][-1].content)["a2ui_operations"]
     assert "sha1aaa" not in json.dumps(ops)
     assert "pr-review-2" in json.dumps(ops)
 
 
 async def test_followup_chat_after_review(monkeypatch):
-    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n: _pr())
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr())
     monkeypatch.setattr(nodes, "create_chat_model", lambda *a, **k: FakeModel())
     await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("t6"))
     FakeModel.calls = []
@@ -296,10 +294,10 @@ async def test_followup_chat_after_review(monkeypatch):
 
 
 async def test_fetch_error_clears_previous(monkeypatch):
-    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n: _pr())
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr())
     await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("t7"))
 
-    def boom(o, r, n):
+    def boom(o, r, n, **kw):
         raise github.GitHubError("nope", 404)
 
     monkeypatch.setattr(github, "fetch_pr", boom)
@@ -309,7 +307,7 @@ async def test_fetch_error_clears_previous(monkeypatch):
 
 
 async def test_zero_valid_lines(monkeypatch):
-    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n: _pr(files=[PRF("x.md", set())]))
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr(files=[PRF("x.md", set())]))
     out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("t8"))
     assert out["findings"] == []
     assert "Nothing reviewable" in out["summary"]
@@ -325,7 +323,7 @@ def test_reset_reducers():
 
 
 def test_review_ops_exclude_rejected():
-    base = {"file": "a.py", "line": 1, "explanation": "e", "suggestion": None, "category": "lint"}
+    base = {"file": "a.py", "line": 1, "explanation": "e", "suggestion": None, "category": "correctness"}
     state = {
         "pr": {"owner": "o", "repo": "r", "number": 3, "title": "T"},
         "findings": [
@@ -360,7 +358,7 @@ def _collect_paths(node, out):
 
 
 def test_review_schema_paths_match_data_model():
-    base = {"file": "a.py", "line": 1, "explanation": "e", "suggestion": "s", "category": "lint"}
+    base = {"file": "a.py", "line": 1, "explanation": "e", "suggestion": "s", "category": "correctness"}
     state = {
         "pr": {"owner": "o", "repo": "r", "number": 3, "title": "T", "url": "u", "author": "a"},
         "summary": "sum",
@@ -411,7 +409,7 @@ async def _run(monkeypatch, tid, files, outputs=None, summary=None, truncated=Fa
     monkeypatch.setattr(nodes, "_summary_model", lambda: summ)
     pr = _pr(files=files)
     pr.truncated = truncated
-    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n: pr)
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: pr)
     out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg(tid))
     return out, reviewer, summ
 
@@ -433,22 +431,22 @@ def test_validation_rules():
         RF(line=3, suggestion="y = 1", title="noop"),              # same as current line -> None
         RF(line=None, title="null line"),                          # dropped, no failure
     ]
-    fs = nodes.validate_findings(raw, files, "lint", "abc")
-    assert [f["id"] for f in fs] == [f"abc-lint-{i}" for i in range(1, 6)]
+    fs = nodes.validate_findings(raw, files, "correctness", "abc")
+    assert [f["id"] for f in fs] == [f"abc-correctness-{i}" for i in range(1, 6)]
     assert [f["title"] for f in fs] == ["off by one", "multi", "trailing", "blank", "noop"]
     assert [f["line"] for f in fs] == [4, 3, 4, 3, 3]
     assert [f["suggestion"] for f in fs] == [None, None, "  w = 2", None, None]
-    assert all(f["category"] == "lint" and f["status"] == "open" for f in fs)
+    assert all(f["category"] == "correctness" and f["status"] == "open" for f in fs)
 
 
 def test_path_normalization():
     files = [_vf("src/a.py", {3})]
     raw = [RF(file=p, title=p) for p in ("./src/a.py", "a/src/a.py", "b/src/a.py", "src/a.py", "c/src/a.py")]
-    fs = nodes.validate_findings(raw, files, "lint", "abc")
+    fs = nodes.validate_findings(raw, files, "correctness", "abc")
     assert [f["title"] for f in fs] == ["./src/a.py", "a/src/a.py", "b/src/a.py", "src/a.py"]
     assert {f["file"] for f in fs} == {"src/a.py"}
     # a real file literally named a/x.py wins over stripping
-    assert nodes.validate_findings([RF(file="a/x.py")], [_vf("a/x.py", {3})], "lint", "s")[0]["file"] == "a/x.py"
+    assert nodes.validate_findings([RF(file="a/x.py")], [_vf("a/x.py", {3})], "correctness", "s")[0]["file"] == "a/x.py"
 
 
 def test_dedupe_and_verdict():
@@ -456,21 +454,21 @@ def test_dedupe_and_verdict():
         return {"id": i, "category": cat, "severity": sev, "file": file, "line": line}
 
     kept = nodes.dedupe_findings([
-        f("1", "lint", "medium"), f("2", "tests", "medium"), f("3", "security", "medium"),   # security wins tie
-        f("4", "lint", "low", line=4), f("5", "tests", "high", line=4),                     # higher severity wins
-        f("6", "lint", "low", line=5), f("7", "lint", "low", line=5),                       # same category: first
-        f("8", "lint", "low", file="b.py"),
+        f("1", "correctness", "medium"), f("2", "tests", "medium"), f("3", "security", "medium"),   # security wins tie
+        f("4", "correctness", "low", line=4), f("5", "tests", "high", line=4),                     # higher severity wins
+        f("6", "correctness", "low", line=5), f("7", "correctness", "low", line=5),                       # same category: first
+        f("8", "correctness", "low", file="b.py"),
     ])
     assert [k["id"] for k in kept] == ["3", "5", "6", "8"]
     assert nodes.verdict_for([]) == "Approve"
-    assert nodes.verdict_for([f("1", "lint", "low"), f("2", "lint", "medium")]) == "Approve with nits"
-    assert nodes.verdict_for([f("1", "lint", "low"), f("2", "lint", "high")]) == "Request changes"
+    assert nodes.verdict_for([f("1", "correctness", "low"), f("2", "correctness", "medium")]) == "Approve with nits"
+    assert nodes.verdict_for([f("1", "correctness", "low"), f("2", "correctness", "high")]) == "Request changes"
 
 
 async def test_cross_category_dedupe_in_graph(monkeypatch):
     same = lambda: ReviewerOutput(findings=[RF(line=3, title="dup", severity="medium")])
     out, _, summ = await _run(monkeypatch, "d1", [PRF("a.py", {3, 4})], {
-        "lint": same(), "security": same(),
+        "correctness": same(), "security": same(),
         "tests": ReviewerOutput(findings=[RF(line=3, title="a"), RF(line=3, title="b"), RF(line=4, title="c")]),
     })
     assert sorted(f["id"] for f in out["findings"]) == ["abc-security-1", "abc-tests-3"]
@@ -483,7 +481,7 @@ async def test_cross_category_dedupe_in_graph(monkeypatch):
 
 HIGH = {
     "security": ReviewerOutput(findings=[RF(line=3, severity="high", title="Hardcoded key")]),
-    "lint": ReviewerOutput(findings=[RF(line=4, severity="low", title="nit")]),
+    "correctness": ReviewerOutput(findings=[RF(line=4, severity="low", title="nit")]),
     "tests": ReviewerOutput(findings=[]),
 }
 HIGH_ID = "abc-security-1"
@@ -525,7 +523,7 @@ async def test_reject_excludes_finding(monkeypatch):
     assert "Verdict: Approve with nits" in out["summary"]
     assert "1 finding(s): 0 high" in out["summary"]
     data = _surface_data(out)
-    assert [f["id"] for f in data["findings"]] == ["abc-lint-1"]
+    assert [f["id"] for f in data["findings"]] == ["abc-correctness-1"]
     assert data["counts"] == {"high": 0, "medium": 0, "low": 1}
     assert out["node_status"]["approval_gate"] == "done"
 
@@ -535,7 +533,7 @@ async def test_approve_keeps_finding(monkeypatch):
     out = await graph.ainvoke(Command(resume={"decisions": {HIGH_ID: "approve"}}), cfg("ap3"))
     by_id = {f["id"]: f for f in out["findings"]}
     assert by_id[HIGH_ID]["status"] == "approved"
-    assert by_id["abc-lint-1"]["status"] == "open"
+    assert by_id["abc-correctness-1"]["status"] == "open"
     assert "Verdict: Request changes" in out["summary"]
     assert HIGH_ID in [f["id"] for f in _surface_data(out)["findings"]]
 
@@ -543,7 +541,7 @@ async def test_approve_keeps_finding(monkeypatch):
 async def test_no_high_no_interrupt(monkeypatch):
     out, _, _ = await _run(monkeypatch, "ap4", [PRF("a.py", {3, 4})], {
         "security": ReviewerOutput(findings=[RF(line=3, severity="medium")]),
-        "lint": ReviewerOutput(findings=[]), "tests": ReviewerOutput(findings=[]),
+        "correctness": ReviewerOutput(findings=[]), "tests": ReviewerOutput(findings=[]),
     })
     assert "__interrupt__" not in out
     assert not (await graph.aget_state(cfg("ap4"))).next
@@ -567,7 +565,7 @@ async def test_resume_json_string(monkeypatch):
 async def test_dedupe_happens_before_gate(monkeypatch):
     # medium + high at the same line: the high one survives dedupe and is the only gated finding.
     outs = {
-        "lint": ReviewerOutput(findings=[RF(line=3, severity="medium", title="m")]),
+        "correctness": ReviewerOutput(findings=[RF(line=3, severity="medium", title="m")]),
         "security": ReviewerOutput(findings=[RF(line=3, severity="high", title="h")]),
         "tests": ReviewerOutput(findings=[]),
     }
@@ -638,12 +636,12 @@ async def test_untrusted_data_delimiters(monkeypatch):
 
 
 async def test_reviewer_error_isolated(monkeypatch):
-    out, _, _ = await _run(monkeypatch, "v2", [PRF("a.py", {3, 4})],
+    out, _, _ = await _run(monkeypatch, "v2", [PRF("a.py", {3, 4, 5, 6})],
                            {"security": RuntimeError("boom")})
     assert out["node_status"]["security_review"] == "error"
-    assert out["node_status"]["lint_review"] == "done"
+    assert out["node_status"]["correctness_review"] == "done"
     assert out["node_status"]["render_findings"] == "done"
-    assert {f["category"] for f in out["findings"]} == {"lint", "tests"}
+    assert {f["category"] for f in out["findings"]} == {"correctness", "tests"}
     assert "security reviewer failed" in out["summary"]
     assert out["review_errors"] and "boom" not in out["review_errors"][0]
 
@@ -659,18 +657,18 @@ async def test_review_errors_reset_on_next_pr(monkeypatch):
 async def test_summary_llm_and_fallback(monkeypatch):
     out, _, summ = await _run(monkeypatch, "v4", [PRF("a.py", {3, 4, 5, 6})])
     assert out["summary"].startswith("**Verdict: Approve with nits**\n\n- Request changes: bad stuff")
-    assert "4 finding(s): 0 high, 4 medium, 0 low." in out["summary"]
-    assert "lint finding" in summ.calls[0][1].content
+    assert "3 finding(s): 0 high, 3 medium, 0 low." in out["summary"]
+    assert "correctness finding" in summ.calls[0][1].content
 
     out, _, _ = await _run(monkeypatch, "v5", [PRF("a.py", {3, 4, 5, 6})], summary=FakeSummary(exc=RuntimeError("down")))
-    assert out["summary"] == "**Verdict: Approve with nits**\n\n4 finding(s): 0 high, 4 medium, 0 low."
+    assert out["summary"] == "**Verdict: Approve with nits**\n\n3 finding(s): 0 high, 3 medium, 0 low."
     assert out["node_status"]["summarize"] == "done"
 
 
 async def test_truncated_note(monkeypatch):
     out, _, _ = await _run(monkeypatch, "v6", [PRF("a.py", {3})], truncated=True)
     assert "diff was truncated" in out["summary"]
-    empty = {c: ReviewerOutput(findings=[]) for c in ("lint", "security", "tests")}
+    empty = {c: ReviewerOutput(findings=[]) for c in ("correctness", "security", "tests")}
     out, _, summ = await _run(monkeypatch, "v7", [PRF("a.py", {3})], empty, truncated=True)
     assert out["summary"].startswith("**Verdict: Approve**\n\nNo findings.") and "truncated" in out["summary"]
     assert summ.calls == []
@@ -679,7 +677,7 @@ async def test_truncated_note(monkeypatch):
 async def test_prompt_contents(monkeypatch):
     files = [PRF("a.py", {2, 3, 4}, DIFF), PRF("big.bin", set(), "[omitted]")]
     _, reviewer, _ = await _run(monkeypatch, "v8", files)
-    assert len(reviewer.calls) == 4
+    assert len(reviewer.calls) == 3
     system, human = reviewer.calls[0]
     assert "PR title: PR 7" in human.content
     assert "### a.py (modified)" in human.content
@@ -693,7 +691,7 @@ async def test_no_reviewable_files_skips_llm(monkeypatch):
     out, reviewer, summ = await _run(monkeypatch, "v9", [PRF("x.md", set())])
     assert reviewer.calls == [] and summ.calls == []
     assert out["findings"] == [] and "Nothing reviewable" in out["summary"]
-    assert out["node_status"]["lint_review"] == "done"
+    assert out["node_status"]["correctness_review"] == "done"
 
 
 @pytest.mark.parametrize("spec,attr", [
@@ -714,7 +712,7 @@ def test_create_chat_model_timeout_retries(monkeypatch, spec, attr):
 def test_action_schema_binding_contract():
     state = {
         "pr": {"owner": "o", "repo": "r", "number": 3},
-        "findings": [{"id": "a", "category": "lint", "severity": "low", "title": "A", "explanation": "e",
+        "findings": [{"id": "a", "category": "correctness", "severity": "low", "title": "A", "explanation": "e",
                       "file": "a.py", "line": 1, "suggestion": "s", "status": "applied"}],
     }
     ops = nodes.build_action_ops(state, "a", "Posted", 2)
@@ -795,7 +793,7 @@ from src import model as model_mod
 _REAL_REVIEWER_MODEL = nodes._reviewer_model  # the autouse fixture replaces nodes._reviewer_model
 
 _ENVS = ("COPILOTKIT_AGENT_MODEL", "REVIEWER_MODEL", "LINT_MODEL", "SECURITY_MODEL",
-         "TESTS_MODEL", "REGRESSION_MODEL", "SUMMARY_MODEL", "CHAT_MODEL", "REVIEWER_BUDGET_SECONDS", "SUMMARY_BUDGET_SECONDS")
+         "TESTS_MODEL", "CORRECTNESS_MODEL", "REGRESSION_MODEL", "MODEL_PRICES", "REVIEW_IGNORE", "SUMMARY_MODEL", "CHAT_MODEL", "REVIEWER_BUDGET_SECONDS", "SUMMARY_BUDGET_SECONDS")
 
 
 @pytest.fixture
@@ -807,24 +805,23 @@ def clean_env(monkeypatch):
 
 def test_resolution_order(clean_env):
     r = model_mod.resolve_model_spec
-    sites = ("lint_review", "security_review", "tests_review", "regression_review", "summarize", "chat")
+    sites = ("security_review", "tests_review", "correctness_review", "summarize", "chat")
     assert all(r(s) == "openai:gpt-5.4" for s in sites)
     clean_env.setenv("COPILOTKIT_AGENT_MODEL", "google:gemini-2.5-flash")
     assert all(r(s) == "google:gemini-2.5-flash" for s in sites)
     clean_env.setenv("REVIEWER_MODEL", "anthropic:claude-sonnet-5-5")
-    assert [r(s) for s in sites] == ["anthropic:claude-sonnet-5-5"] * 4 + ["google:gemini-2.5-flash"] * 2
-    clean_env.setenv("LINT_MODEL", "xai:grok-4")
+    assert [r(s) for s in sites] == ["anthropic:claude-sonnet-5-5"] * 3 + ["google:gemini-2.5-flash"] * 2
     clean_env.setenv("SECURITY_MODEL", "anthropic:claude-opus-5-5")
     clean_env.setenv("TESTS_MODEL", "grok:grok-4")
-    clean_env.setenv("REGRESSION_MODEL", "google:gemini-2.5-pro")
+    clean_env.setenv("CORRECTNESS_MODEL", "google:gemini-2.5-pro")
     clean_env.setenv("SUMMARY_MODEL", "anthropic:claude-haiku-5-5")
     clean_env.setenv("CHAT_MODEL", "openai:gpt-5.4-mini")
     assert [r(s) for s in sites] == [
-        "xai:grok-4", "anthropic:claude-opus-5-5", "grok:grok-4", "google:gemini-2.5-pro",
+        "anthropic:claude-opus-5-5", "grok:grok-4", "google:gemini-2.5-pro",
         "anthropic:claude-haiku-5-5", "openai:gpt-5.4-mini",
     ]
-    clean_env.setenv("LINT_MODEL", "  ")  # blank falls through to the group var
-    assert r("lint_review") == "anthropic:claude-sonnet-5-5"
+    clean_env.setenv("CORRECTNESS_MODEL", "  ")  # blank falls through to the group var
+    assert r("correctness_review") == "anthropic:claude-sonnet-5-5"
 
 
 def test_invalid_spec_names_env_var(clean_env):
@@ -834,7 +831,7 @@ def test_invalid_spec_names_env_var(clean_env):
     clean_env.delenv("SECURITY_MODEL")
     clean_env.setenv("REVIEWER_MODEL", "bad:")
     with pytest.raises(ValueError, match="REVIEWER_MODEL"):
-        model_mod.resolve_model_spec("lint_review")
+        model_mod.resolve_model_spec("correctness_review")
     clean_env.delenv("REVIEWER_MODEL")
     clean_env.setenv("COPILOTKIT_AGENT_MODEL", "mistral:x")
     with pytest.raises(ValueError, match="COPILOTKIT_AGENT_MODEL"):
@@ -858,8 +855,9 @@ def test_anthropic_no_sampling_params(clean_env):
 
 
 @pytest.mark.parametrize("provider,expected", [
-    ("anthropic", {"method": "json_schema"}), ("xai", {"method": "json_schema"}),
-    ("openai", {}), ("google", {}),
+    ("anthropic", {"method": "json_schema", "include_raw": True}),
+    ("xai", {"method": "json_schema", "include_raw": True}),
+    ("openai", {"include_raw": True}), ("google", {"include_raw": True}),
 ])
 def test_structured_method_per_provider(provider, expected):
     class Spy:
@@ -886,7 +884,7 @@ async def test_reviewer_model_uses_json_schema_for_anthropic(clean_env):
 
     clean_env.setattr(ChatAnthropic, "with_structured_output", spy)
     _REAL_REVIEWER_MODEL("security")
-    assert seen == {"method": "json_schema"}
+    assert seen == {"method": "json_schema", "include_raw": True}
 
 
 def test_anthropic_output_schema_valid():
@@ -921,8 +919,8 @@ async def test_node_models_recorded_and_reset(clean_env):
     clean_env.setenv("SUMMARY_MODEL", "xai:grok-4")
     out, _, _ = await _run(clean_env, "nm1", [PRF("a.py", {3, 4, 5})])
     assert out["node_models"] == {
-        "lint_review": "anthropic:claude-sonnet-5-5", "security_review": "anthropic:claude-opus-5-5",
-        "tests_review": "anthropic:claude-sonnet-5-5", "regression_review": "anthropic:claude-sonnet-5-5",
+        "correctness_review": "anthropic:claude-sonnet-5-5", "security_review": "anthropic:claude-opus-5-5",
+        "tests_review": "anthropic:claude-sonnet-5-5",
         "summarize": "xai:grok-4",
     }
     clean_env.delenv("REVIEWER_MODEL")
@@ -931,10 +929,10 @@ async def test_node_models_recorded_and_reset(clean_env):
     clean_env.setattr(nodes, "create_chat_model", lambda *a, **k: FakeModel())
     out = await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, cfg("nm1"))
     assert out["node_models"] == {"chat": "openai:gpt-5.4"}
-    clean_env.setattr(github, "fetch_pr", lambda o, r, n: _pr())
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr())
     out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("nm1"))
     assert "chat" not in out["node_models"]
-    assert out["node_models"]["lint_review"] == "openai:gpt-5.4"
+    assert out["node_models"]["correctness_review"] == "openai:gpt-5.4"
 
 
 class SlowReviewer(FakeReviewer):
@@ -954,11 +952,11 @@ async def test_reviewer_timeout(clean_env):
     slow = SlowReviewer()
     clean_env.setattr(nodes, "_reviewer_model", lambda *a: slow)
     clean_env.setattr(nodes, "_summary_model", lambda: FakeSummary())
-    clean_env.setattr(github, "fetch_pr", lambda o, r, n: _pr(files=[PRF("a.py", {3, 4, 5, 6})]))
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr(files=[PRF("a.py", {3, 4, 5, 6})]))
     out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("to1"))
     assert out["node_status"]["security_review"] == "timeout"
-    assert out["node_status"]["lint_review"] == "done" and out["node_status"]["tests_review"] == "done"
-    assert {f["category"] for f in out["findings"]} == {"lint", "tests", "regression"}
+    assert out["node_status"]["correctness_review"] == "done" and out["node_status"]["tests_review"] == "done"
+    assert {f["category"] for f in out["findings"]} == {"correctness", "tests"}
     assert "security reviewer timed out after 0.05s" in out["summary"]
     assert any("timed out" in e for e in out["review_errors"])
 
@@ -971,63 +969,477 @@ async def test_summary_timeout_falls_back(clean_env):
             await asyncio.sleep(5)
 
     out, _, _ = await _run(clean_env, "to2", [PRF("a.py", {3, 4, 5, 6})], summary=SlowSummary())
-    assert out["summary"] == "**Verdict: Approve with nits**\n\n4 finding(s): 0 high, 4 medium, 0 low."
+    assert out["summary"] == "**Verdict: Approve with nits**\n\n3 finding(s): 0 high, 3 medium, 0 low."
     assert out["node_status"]["summarize"] == "done"
 
 
 async def test_invalid_model_messages_are_actionable(clean_env):
-    clean_env.setenv("LINT_MODEL", "foo")
+    clean_env.setenv("CORRECTNESS_MODEL", "foo")
     out, _, _ = await _run(clean_env, "bad1", [PRF("a.py", {3, 4, 5})])
     # the autouse fake bypasses model construction; exercise the real factory path
     clean_env.setattr(nodes, "_reviewer_model", _REAL_REVIEWER_MODEL)
     out = await graph.ainvoke({"messages": [HumanMessage(content=_url(9))]}, cfg("bad2"))
-    assert out["node_status"]["lint_review"] == "error"
-    assert any('LINT_MODEL="foo"' in e for e in out["review_errors"])
-    clean_env.delenv("LINT_MODEL")
+    assert out["node_status"]["correctness_review"] == "error"
+    assert any('CORRECTNESS_MODEL="foo"' in e for e in out["review_errors"])
+    clean_env.delenv("CORRECTNESS_MODEL")
     clean_env.setenv("CHAT_MODEL", "nonsense")
     out = await graph.ainvoke({"messages": [HumanMessage(content="hi")]}, cfg("bad3"))
     assert "CHAT_MODEL" in out["messages"][-1].content and out["node_status"] == {"chat": "error"}
 
 
-# ------------------------------------------------------------ regression reviewer
-
-def test_regression_rubric_and_ownership_scoping():
-    assert "regression" in nodes.RUBRICS
-    lint = nodes.RUBRICS["lint"][1]
-    assert "regression reviewer owns" in lint and "breaking-change" in lint
-    tests = nodes.RUBRICS["tests"][1]
-    assert "deleted tests" in tests and "regression reviewer" in tests
-    assert "deleted or disabled tests" not in tests
-    reg = nodes.RUBRICS["regression"][1]
-    assert "may break callers" in reg and "at most 8" in reg
-    assert "Do NOT report security" in reg and "missing tests for new code" in reg
 
 
-async def test_regression_runs_in_parallel_and_is_recorded(clean_env):
-    clean_env.setenv("REGRESSION_MODEL", "anthropic:claude-opus-5-5")
+# ------------------------------------------------------------ correctness reviewer (lint removed, regression merged)
+
+def test_correctness_rubric_and_ownership_scoping():
+    assert set(nodes.RUBRICS) == {"security", "tests", "correctness"}
+    cor = nodes.RUBRICS["correctness"][1]
+    for needle in ("off-by-one", "null/None", "division by zero", "resource leaks", "may break callers",
+                   "deleted tests", "at most 8", "Do NOT report style", "Do NOT report security",
+                   "missing or weak tests for new code"):
+        assert needle in cor, needle
+    assert "correctness reviewer" in nodes.RUBRICS["tests"][1]
+    assert "correctness reviewer" in nodes.RUBRICS["security"][1]
+    for _, rubric in nodes.RUBRICS.values():
+        assert "lint reviewer" not in rubric and "regression reviewer" not in rubric
+
+
+async def test_runs_exactly_three_reviewers_in_parallel(clean_env):
+    clean_env.setenv("CORRECTNESS_MODEL", "anthropic:claude-opus-5-5")
     clean_env.setenv("REVIEWER_BUDGET_SECONDS", "10")
-    slow = SlowReviewer(slow=("lint", "security", "tests", "regression"), delay=0.3)
+    slow = SlowReviewer(slow=("security", "tests", "correctness"), delay=0.3)
     clean_env.setattr(nodes, "_reviewer_model", lambda *a: slow)
     clean_env.setattr(nodes, "_summary_model", lambda: FakeSummary())
-    clean_env.setattr(github, "fetch_pr", lambda o, r, n: _pr())
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr())
     started = asyncio.get_event_loop().time()
     out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("rg1"))
-    assert asyncio.get_event_loop().time() - started < 1.0  # 4 x 0.3s would be >= 1.2s if sequential
-    assert out["node_status"]["regression_review"] == "done"
-    assert out["node_models"]["regression_review"] == "anthropic:claude-opus-5-5"
-    assert any(f["category"] == "regression" and f["line"] == 6 for f in out["findings"])
+    assert asyncio.get_event_loop().time() - started < 0.85  # 3 x 0.3s would be >= 0.9s if sequential
+    assert len(slow.calls) == 3
+    reviewers = {k for k in out["node_status"] if k.endswith("_review")}
+    assert reviewers == {"security_review", "tests_review", "correctness_review"}
+    assert out["node_models"]["correctness_review"] == "anthropic:claude-opus-5-5"
+    assert {f["category"] for f in out["findings"]} == {"security", "tests", "correctness"}
+    assert not any("lint" in k or "regression" in k for k in out["node_status"])
 
 
-async def test_regression_failure_isolated(monkeypatch):
-    out, _, _ = await _run(monkeypatch, "rg2", [PRF("a.py", {3, 4, 5, 6})], {"regression": RuntimeError("x")})
-    assert out["node_status"]["regression_review"] == "error"
-    assert out["node_status"]["lint_review"] == "done"
-    assert "regression" not in {f["category"] for f in out["findings"]}
+async def test_correctness_failure_isolated(monkeypatch):
+    out, _, _ = await _run(monkeypatch, "rg2", [PRF("a.py", {3, 4, 5, 6})], {"correctness": RuntimeError("x")})
+    assert out["node_status"]["correctness_review"] == "error"
+    assert out["node_status"]["security_review"] == "done"
+    assert "correctness" not in {f["category"] for f in out["findings"]}
 
 
-def test_dedupe_regression_tie_breaks():
+def test_dedupe_priority():
     def f(i, cat, sev="medium"):
         return {"id": i, "file": "a.py", "line": 1, "category": cat, "severity": sev}
-    assert [k["id"] for k in nodes.dedupe_findings([f("l", "lint"), f("r", "regression")])] == ["r"]
-    assert [k["id"] for k in nodes.dedupe_findings([f("r", "regression"), f("s", "security")])] == ["s"]
-    assert [k["id"] for k in nodes.dedupe_findings([f("r", "regression"), f("t", "tests")])] == ["r"]
+    ids = lambda *fs: [k["id"] for k in nodes.dedupe_findings(list(fs))]
+    assert ids(f("c", "correctness"), f("t", "tests")) == ["c"]
+    assert ids(f("c", "correctness"), f("s", "security")) == ["s"]
+    assert ids(f("t", "tests"), f("c", "correctness", "low")) == ["t"]
+
+
+def test_category_literal():
+    from src.review.models import Finding
+
+    with pytest.raises(ValueError):
+        Finding(id="x", category="lint", severity="low", title="t", explanation="e", file="a", line=1)
+    with pytest.raises(ValueError):
+        Finding(id="x", category="regression", severity="low", title="t", explanation="e", file="a", line=1)
+    assert Finding(id="x", category="correctness", severity="low", title="t", explanation="e", file="a", line=1)
+
+
+def test_legacy_env_warnings(clean_env, caplog):
+    import logging
+
+    model_mod._WARNED.clear()
+    r = model_mod.resolve_model_spec
+    clean_env.setenv("REVIEWER_MODEL", "anthropic:claude-sonnet-5-5")
+    clean_env.setenv("REGRESSION_MODEL", "xai:grok-4")
+    clean_env.setenv("LINT_MODEL", "google:gemini-2.5-pro")
+    with caplog.at_level(logging.WARNING, logger="src.model"):
+        assert r("correctness_review") == "xai:grok-4"  # alias works
+        assert r("tests_review") == "anthropic:claude-sonnet-5-5"  # LINT_MODEL never read
+        assert r("correctness_review") == "xai:grok-4"
+    msgs = [m.getMessage() for m in caplog.records]
+    assert sum("REGRESSION_MODEL is deprecated" in m for m in msgs) == 1  # one-time
+    assert sum("LINT_MODEL is ignored" in m for m in msgs) == 1
+    clean_env.setenv("CORRECTNESS_MODEL", "openai:gpt-5.4-mini")  # beats the alias
+    assert r("correctness_review") == "openai:gpt-5.4-mini"
+    assert "lint_review" not in model_mod.SITE_ENV and "regression_review" not in model_mod.SITE_ENV
+
+
+# ------------------------------------------------------------ noise, slices
+
+from src.review import files as filemod
+
+
+@pytest.mark.parametrize("path,noise", [
+    ("package-lock.json", True), ("web/yarn.lock", True), ("pnpm-lock.yaml", True), ("npm-shrinkwrap.json", True),
+    ("agent/uv.lock", True), ("poetry.lock", True), ("Pipfile.lock", True), ("Cargo.lock", True),
+    ("Gemfile.lock", True), ("composer.lock", True), ("go.sum", True),
+    ("static/app.min.js", True), ("a/b.min.css", True), ("bundle.js.map", True),
+    ("src/__snapshots__/x.test.ts.snap", True), ("x.snap", True),
+    ("dist/index.js", True), ("build/out.js", True), ("out/a.js", True), ("coverage/lcov.info", True),
+    ("target/debug/x.rs", True), (".next/server/a.js", True), ("vendor/lib/x.go", True),
+    ("node_modules/a/b.js", True), ("web/node_modules/a/b.py", True), ("a/b/__snapshots__/c.txt", True),
+    ("api/foo_pb2.py", True), ("api/foo.pb.go", True), ("src/api.generated.ts", True),
+    ("tests/baselines/reference/a.js", True), ("tsc/testdata/baselines/reference/x/y.js", True),
+    ("tests/baselines/reference/a.errors.txt", True), ("tests/baselines/reference/a.types", True),
+    ("tests/baselines/reference/a.json", True),
+    # false positives that must be reviewed: a directory name alone never hides source/config/scripts
+    ("src/build/compiler.ts", False), ("tools/build/deploy.py", False), ("app/vendor/stripe_client.py", False),
+    ("scripts/build/Dockerfile", False), ("tests/__fixtures__/auth.json", False), ("pkg/dist/util.go", False),
+    ("src/out/render.rb", False), ("lib/target/Foo.java", False), ("src/coverage/report.py", False),
+    ("src/baselines/compare.py", False), ("scripts/baselines/run.sh", False), ("src/baselines/ci.yaml", False),
+    ("config/baselines/a.json", False), ("a/build/config.toml", False),
+    ("src/app.py", False), ("package.json", False), ("README.md", False), ("src/builder.py", False),
+    ("tests/test_a.py", False), ("src/baselines.py", False), ("src/distance.py", False),
+    ("yarn.lock.md", False), ("src/vendored.py", False),
+])
+def test_is_noise(clean_env, path, noise):
+    assert filemod.is_noise(path) is noise
+
+
+def test_review_ignore_globs(clean_env):
+    assert not filemod.is_noise("src/gen/api.py") and not filemod.is_noise("docs/changelog.md")
+    clean_env.setenv("REVIEW_IGNORE", " src/gen/*, *.changelog.md ,")
+    assert filemod.ignore_globs() == ["src/gen/*", "*.changelog.md"]
+    assert filemod.is_noise("src/gen/api.py") and filemod.is_noise("docs/x.changelog.md")
+    assert not filemod.is_noise("src/real.py")
+
+
+@pytest.mark.parametrize("path,kind", [
+    ("src/app.py", "source"), ("web/app.tsx", "source"), ("main.go", "source"),
+    ("tests/test_x.py", "test"), ("x_test.py", "test"), ("test_x.py", "test"), ("a/b.test.ts", "test"),
+    ("a/b.test.tsx", "test"), ("a/b.spec.ts", "test"), ("a/b.spec.tsx", "test"), ("pkg/__tests__/a.js", "test"),
+    ("test/helper.py", "test"), ("tests/data.json", "test"),
+    ("README.md", "docs"), ("docs/guide.html", "docs"), ("notes.txt", "docs"), ("a.rst", "docs"),
+    ("config.yaml", "config"), ("a.yml", "config"), ("pyproject.toml", "config"), ("package.json", "config"),
+    ("setup.ini", "config"), ("requirements.txt", "config"), ("requirements-dev.txt", "config"),
+    ("agent/constraints.txt", "config"), ("pytest.ini", "config"), ("tox.ini", "config"), (".env.example", "config"), ("Dockerfile", "config"), ("Makefile", "config"),
+    (".github/workflows/ci.yml", "config"),
+])
+def test_file_kind(path, kind):
+    assert filemod.file_kind(path) == kind
+
+
+def test_slices_by_kind():
+    assert filemod.SLICES == {
+        "security": {"source", "test", "config", "docs"},
+        "tests": {"source", "test", "config"},
+        "correctness": {"source", "test", "config"},
+    }
+
+
+SLICE_FILES = [
+    PRF("src/app.py", {3, 4, 5, 6}, "   3+a\n   4+b\n   5+c\n   6+d"),
+    PRF("tests/test_app.py", {3, 4, 5, 6}, "   3+a\n   4+b\n   5+c\n   6+d"),
+    PRF("docs/guide.md", {3, 4, 5, 6}, "   3+a\n   4+b\n   5+c\n   6+d"),
+    PRF("deploy.yaml", {3, 4, 5, 6}, "   3+a\n   4+b\n   5+c\n   6+d"),
+]
+
+
+def _reviewer_by_category(reviewer):
+    out = {}
+    for system, human in reviewer.calls:
+        cat = next(c for c in nodes.RUBRICS if nodes.RUBRICS[c][0] in system.content)
+        out[cat] = human.content
+    return out
+
+
+async def test_each_reviewer_receives_only_its_slice(monkeypatch):
+    out, reviewer, _ = await _run(monkeypatch, "sl1", SLICE_FILES)
+    prompts = _reviewer_by_category(reviewer)
+    headers = lambda text: sorted(l[4:].split(" ")[0] for l in text.splitlines() if l.startswith("### "))
+    assert headers(prompts["security"]) == ["deploy.yaml", "docs/guide.md", "src/app.py", "tests/test_app.py"]
+    assert headers(prompts["tests"]) == ["deploy.yaml", "src/app.py", "tests/test_app.py"]
+    assert headers(prompts["correctness"]) == ["deploy.yaml", "src/app.py", "tests/test_app.py"]
+    assert "not in your scope" not in prompts["security"]
+    assert "1 other changed file(s) are not in your scope and are not shown: docs/guide.md" in prompts["tests"]
+    assert "### docs/guide.md" not in prompts["tests"] and "<diff file=\"docs/guide.md\"" not in prompts["tests"]
+    assert "1 other changed file(s) are not in your scope and are not shown: docs/guide.md" in prompts["correctness"]
+    assert "   3+a" not in prompts["tests"].split("not in your scope")[1]
+    assert {k: v["files"] for k, v in out["node_usage"].items() if k.endswith("_review")} == {
+        "security_review": 4, "tests_review": 3, "correctness_review": 3}
+
+
+async def test_findings_outside_slice_dropped(monkeypatch):
+    outs = {
+        "tests": ReviewerOutput(findings=[RF(file="docs/guide.md", line=3), RF(file="src/app.py", line=4)]),
+        "security": ReviewerOutput(), "correctness": ReviewerOutput(findings=[RF(file="docs/guide.md", line=3)]),
+    }
+    out, _, _ = await _run(monkeypatch, "sl2", SLICE_FILES, outs)
+    assert [(f["category"], f["file"]) for f in out["findings"]] == [("tests", "src/app.py")]
+
+
+async def test_empty_slice_skips_call(monkeypatch):
+    out, reviewer, _ = await _run(monkeypatch, "sl3", [PRF("docs/guide.md", {3, 4}, "   3+a\n   4+b")],
+                                  {"security": ReviewerOutput()})
+    assert len(reviewer.calls) == 1  # only security
+    assert out["node_status"]["tests_review"] == "done" and out["node_status"]["correctness_review"] == "done"
+    for node in ("tests_review", "correctness_review"):
+        assert out["node_usage"][node] == {"input_tokens": 0, "output_tokens": 0, "cached_tokens": 0,
+                                           "cost_usd": 0.0, "files": 0}
+    assert out["node_usage"]["security_review"]["files"] == 1
+
+
+async def test_noise_files_skipped_end_to_end(monkeypatch):
+    noise = PRF("package-lock.json", {1, 2}, "   1+x\n   2+y")
+    pr = _pr(files=[noise, PRF("a.py", {3, 4, 5, 6}), PRF("yarn.lock", {1}, "   1+z")])
+    seen = {}
+
+    def fake_fetch(o, r, n, **kw):  # behave like github.fetch_pr: apply the skip predicate
+        skip = seen["skip"] = kw["skip"]
+        pr.skipped_files = ["dist/a.js"] + [f.filename for f in pr.files if skip(f.filename)]
+        pr.skipped_changes = {"package-lock.json": (120, 34)}
+        pr.files = [f for f in pr.files if not skip(f.filename)]
+        return pr
+
+    monkeypatch.setattr(github, "fetch_pr", fake_fetch)
+    reviewer = FakeReviewer()
+    monkeypatch.setattr(nodes, "_reviewer_model", lambda *a: reviewer)
+    monkeypatch.setattr(nodes, "_summary_model", lambda: FakeSummary())
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("nz1"))
+    assert seen["skip"]("go.sum") and not seen["skip"]("a.py")
+    assert [f["filename"] for f in out["files"]] == ["a.py"]
+    assert out["review_stats"]["skipped_files"] == ["dist/a.js", "package-lock.json", "yarn.lock"]
+    assert out["review_stats"]["files_total"] == 4
+    assert "Skipped 3 files (lock/generated/vendor): dist/a.js, package-lock.json, yarn.lock" in out["summary"]
+    assert all("### package-lock.json" not in human.content and "### yarn.lock" not in human.content
+               for _, human in reviewer.calls)
+
+
+def test_skip_note_caps_names():
+    note = nodes.skip_note([f"f{i}.lock" for i in range(12)])
+    assert note.startswith("Skipped 12 files (lock/generated/vendor): f0.lock, f1.lock")
+    assert "f7.lock" in note and "f8.lock" not in note and "(+4 more)" in note
+    assert nodes.skip_note([]) is None
+
+
+def test_github_skip_does_not_use_budget():
+    raw = [
+        {"filename": "package-lock.json", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+" + "b" * 500},
+        {"filename": "a.py", "status": "modified", "patch": "@@ -1 +1 @@\n-a\n+b"},
+    ]
+    meta = {"html_url": "u", "head": {"sha": "s"}, "base": {"ref": "m"}}
+    pr = github._build_pr("o", "r", 1, {**meta, "head": {"sha": "s", "ref": "x"}}, raw, 100, 1000,
+                          filemod.is_noise)
+    assert [f.filename for f in pr.files] == ["a.py"] and pr.skipped_files == ["package-lock.json"]
+    assert not pr.truncated
+
+
+# ------------------------------------------------------------ token usage and cost
+
+
+def _raw(inp, out, cache=None):
+    details = {"cache_read": cache} if cache is not None else {}
+    return AIMessage(content="", usage_metadata={
+        "input_tokens": inp, "output_tokens": out, "total_tokens": inp + out, "input_token_details": details})
+
+
+class RawReviewer(FakeReviewer):
+    """Mimics ``with_structured_output(include_raw=True)``: dict with raw message + parsed."""
+
+    def __init__(self, usage, outputs=None):
+        super().__init__(outputs)
+        self.usage = usage
+
+    async def ainvoke(self, messages, config=None):
+        parsed = await super().ainvoke(messages, config)
+        return {"raw": _raw(*self.usage), "parsed": parsed, "parsing_error": None}
+
+
+async def test_node_usage_from_include_raw(clean_env):
+    clean_env.setenv("REVIEWER_MODEL", "anthropic:claude-sonnet-5-5")
+    clean_env.setenv("SECURITY_MODEL", "openai:gpt-5.4")  # unpriced
+    summary = FakeSummary()
+
+    async def summary_invoke(messages, config=None):
+        summary.calls.append(messages)
+        reply = AIMessage(content="- x")
+        reply.usage_metadata = {"input_tokens": 100, "output_tokens": 50, "total_tokens": 150}
+        return reply
+
+    summary.ainvoke = summary_invoke
+    rr = RawReviewer((1_000_000, 100_000, 400_000))
+    clean_env.setattr(nodes, "_reviewer_model", lambda *a: rr)
+    clean_env.setattr(nodes, "_summary_model", lambda: summary)
+    clean_env.setenv("SUMMARY_MODEL", "anthropic:claude-haiku-5-5")
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr(files=[PRF("a.py", {3, 4, 5, 6})]))
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("us1"))
+    u = out["node_usage"]
+    # sonnet: 600k uncached * $2 + 400k cached * $0.20 + 100k out * $10 = 1.2 + 0.08 + 1.0
+    assert u["tests_review"] == {"input_tokens": 1_000_000, "output_tokens": 100_000, "cached_tokens": 400_000,
+                                 "cost_usd": 2.28, "files": 1}
+    assert u["correctness_review"]["cost_usd"] == 2.28
+    assert u["security_review"]["cost_usd"] is None and u["security_review"]["input_tokens"] == 1_000_000
+    # haiku summary: 100 * 0.10/1M + 50 * 0.50/1M
+    assert u["summarize"] == {"input_tokens": 100, "output_tokens": 50, "cached_tokens": 0, "cost_usd": 0.000035}
+    stats = out["review_stats"]
+    assert stats["input_tokens"] == 3_000_100 and stats["output_tokens"] == 300_050
+    assert stats["cached_tokens"] == 1_200_000
+    assert stats["cost_usd"] is None  # security model is unpriced
+    assert stats["skipped_files"] == [] and stats["files_total"] == 1
+
+
+async def test_review_stats_cost_sums_when_all_priced(clean_env):
+    clean_env.setenv("COPILOTKIT_AGENT_MODEL", "anthropic:claude-sonnet-5-5")
+    rr = RawReviewer((1000, 100))
+    clean_env.setattr(nodes, "_reviewer_model", lambda *a: rr)
+    clean_env.setattr(nodes, "_summary_model", lambda: FakeSummary())
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr(files=[PRF("a.py", {3, 4, 5, 6})]))
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("us2"))
+    per = (1000 * 2 + 100 * 10) / 1e6
+    assert out["node_usage"]["security_review"]["cost_usd"] == per
+    assert out["review_stats"]["cost_usd"] == pytest.approx(3 * per)
+
+
+async def test_usage_missing_metadata_is_zero(monkeypatch):
+    out, _, _ = await _run(monkeypatch, "us3", [PRF("a.py", {3, 4, 5, 6})])
+    assert out["node_usage"]["tests_review"]["input_tokens"] == 0
+    assert out["node_usage"]["tests_review"]["cost_usd"] is None  # default openai:gpt-5.4 is unpriced
+    assert out["review_stats"]["cost_usd"] is None
+
+
+async def test_parsing_error_marks_reviewer_failed(monkeypatch):
+    class BadParse(FakeReviewer):
+        async def ainvoke(self, messages, config=None):
+            return {"raw": _raw(5, 5), "parsed": None, "parsing_error": ValueError("bad json")}
+
+    monkeypatch.setattr(nodes, "_reviewer_model", lambda *a: BadParse())
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr(files=[PRF("a.py", {3})]))
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("us4"))
+    assert out["node_status"]["security_review"] == "error" and out["findings"] == []
+    assert out["node_usage"]["security_review"]["input_tokens"] == 5  # usage kept despite the parse error
+    assert out["review_stats"]["partial"] is True and out["review_stats"]["input_tokens"] >= 15
+
+
+def test_unpack_structured_variants():
+    parsed = ReviewerOutput(findings=[])
+    assert model_mod.unpack_structured(parsed, ReviewerOutput) == (parsed, None)
+    got, raw = model_mod.unpack_structured({"findings": []}, ReviewerOutput)
+    assert isinstance(got, ReviewerOutput) and raw is None
+    msg = _raw(1, 2)
+    got, raw = model_mod.unpack_structured({"raw": msg, "parsed": {"findings": []}, "parsing_error": None},
+                                           ReviewerOutput)
+    assert isinstance(got, ReviewerOutput) and raw is msg
+
+
+def test_price_table_and_cost(clean_env):
+    u = lambda i, o, c=0: {"input_tokens": i, "output_tokens": o, "cached_tokens": c}
+    cases = {
+        "anthropic:claude-opus-5-5": (4.0 + 20.0, 4.0 * 0.5 + 0.2 * 0.5 + 20.0),
+        "anthropic:claude-sonnet-5-5": (2.0 + 10.0, 2.0 * 0.5 + 0.2 * 0.5 + 10.0),
+        "anthropic:claude-haiku-5-5": (0.10 + 0.50, 0.10 * 0.5 + 0.10 * 0.5 + 0.50),  # no cache price: input
+    }
+    for spec, (plain, cached) in cases.items():
+        assert model_mod.cost_usd(spec, u(1_000_000, 1_000_000)) == pytest.approx(plain)
+        assert model_mod.cost_usd(spec, u(1_000_000, 1_000_000, 500_000)) == pytest.approx(cached)
+    assert model_mod.cost_usd("anthropic:claude-sonnet-5-5-20261001", u(1_000_000, 0)) == pytest.approx(2.0)
+    for spec in ("openai:gpt-5.4", "google:gemini-2.5-pro", "xai:grok-4", "anthropic:claude-3-opus", None, "junk"):
+        assert model_mod.cost_usd(spec, u(1000, 1000)) is None
+
+
+def test_model_prices_override(clean_env):
+    u = {"input_tokens": 1_000_000, "output_tokens": 1_000_000, "cached_tokens": 1_000_000}
+    clean_env.setenv("MODEL_PRICES", json.dumps({
+        "openai:gpt-5.4": {"input": 1, "output": 3, "cache_read": 0.1},
+        "anthropic/claude-sonnet-5-5": {"input": 9, "output": 9},
+    }))
+    assert model_mod.cost_usd("openai:gpt-5.4", u) == pytest.approx(0.1 + 3)
+    assert model_mod.cost_usd("anthropic:claude-sonnet-5-5", u) == pytest.approx(9 + 9)  # override beats table
+    assert model_mod.cost_usd("openai:gpt-5.4-mini", u) is None
+    clean_env.setenv("MODEL_PRICES", "{not json")
+    assert model_mod.cost_usd("openai:gpt-5.4", u) is None
+    assert model_mod.cost_usd("anthropic:claude-sonnet-5-5", u) is not None
+
+
+async def test_chat_records_usage_and_resets(clean_env):
+    class UsageModel(FakeModel):
+        async def ainvoke(self, messages, config=None):
+            return AIMessage(content="hi", usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15})
+
+    clean_env.setenv("CHAT_MODEL", "anthropic:claude-haiku-5-5")
+    clean_env.setattr(nodes, "create_chat_model", lambda *a, **k: UsageModel())
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr())
+    await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("us5"))
+    out = await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, cfg("us5"))
+    assert set(out["node_usage"]) == {"chat"} and out["node_usage"]["chat"]["input_tokens"] == 10
+    assert out["node_usage"]["chat"]["cost_usd"] == pytest.approx((10 * 0.1 + 5 * 0.5) / 1e6)
+
+
+async def test_new_review_resets_usage_and_stats(monkeypatch):
+    def fetch(o, r, n, **kw):
+        pr = _pr(files=[PRF("a.py", {3, 4, 5, 6})])
+        pr.skipped_files = ["go.sum"]
+        return pr
+
+    monkeypatch.setattr(github, "fetch_pr", fetch)
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("us6"))
+    assert out["review_stats"]["skipped_files"] == ["go.sum"]
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr(files=[PRF("b.py", {3})]))
+    out = await graph.ainvoke({"messages": [HumanMessage(content=_url(8))]}, cfg("us6"))
+    assert out["review_stats"]["skipped_files"] == [] and out["review_stats"]["files_total"] == 1
+
+
+def test_out_of_scope_list_is_capped():
+    files = [_vf(f"docs/d{i}.md", {1}, "   1+x") for i in range(13)] + [_vf("a.py", {1}, "   1+x")]
+    text, reviewable = nodes.build_diff_prompt({"files": files, "pr": {}}, "tests")
+    assert [f["filename"] for f in reviewable] == ["a.py"]
+    assert "13 other changed file(s) are not in your scope" in text
+    assert "docs/d9.md" in text and "docs/d10.md" not in text and "(+3 more)" in text
+
+
+async def test_lockfile_stub_for_security_only(monkeypatch):
+    pr = _pr(files=[PRF("a.py", {3, 4, 5, 6}, "   3+a\n   4+b\n   5+c\n   6+d")])
+    pr.skipped_files = ["web/package-lock.json", "dist/app.js"]
+    pr.skipped_changes = {"web/package-lock.json": (120, 34), "dist/app.js": (9, 9)}
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: pr)
+    reviewer = FakeReviewer()
+    monkeypatch.setattr(nodes, "_reviewer_model", lambda *a: reviewer)
+    monkeypatch.setattr(nodes, "_summary_model", lambda: FakeSummary())
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("lk1"))
+    prompts = _reviewer_by_category(reviewer)
+    stub = ("web/package-lock.json changed (+120/\u221234 lines) \u2014 content omitted; "
+            "flag only if other changes suggest dependency risk")
+    assert stub in prompts["security"]
+    assert "package-lock" not in prompts["tests"] and "package-lock" not in prompts["correctness"]
+    assert "dist/app.js" not in prompts["security"]  # only lockfiles get a stub
+    assert out["pr"]["lockfiles"] == [{"filename": "web/package-lock.json", "additions": 120, "deletions": 34}]
+    assert "Skipped 2 files (lock/generated/vendor)" in out["summary"]
+
+
+async def test_lockfile_only_pr_makes_no_llm_call(monkeypatch):
+    pr = _pr(files=[])
+    pr.skipped_files, pr.skipped_changes = ["uv.lock"], {"uv.lock": (5, 5)}
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: pr)
+    reviewer = FakeReviewer()
+    monkeypatch.setattr(nodes, "_reviewer_model", lambda *a: reviewer)
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("lk2"))
+    assert reviewer.calls == [] and out["review_stats"]["partial"] is False
+
+
+def test_github_records_skipped_changes():
+    raw = [{"filename": "go.sum", "status": "modified", "additions": 7, "deletions": 2, "patch": "@@ -1 +1 @@\n+x"}]
+    meta = {"html_url": "u", "head": {"sha": "s", "ref": "x"}, "base": {"ref": "m"}}
+    pr = github._build_pr("o", "r", 1, meta, raw, 1000, 1000, filemod.is_noise)
+    assert pr.skipped_changes == {"go.sum": (7, 2)}
+
+
+async def test_partial_flag_on_timeout_and_clean_run(clean_env):
+    clean_env.setenv("REVIEWER_BUDGET_SECONDS", "0.05")
+    slow = SlowReviewer()
+    clean_env.setattr(nodes, "_reviewer_model", lambda *a: slow)
+    clean_env.setattr(nodes, "_summary_model", lambda: FakeSummary())
+    clean_env.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr(files=[PRF("a.py", {3, 4, 5, 6})]))
+    out = await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg("pt1"))
+    assert out["node_status"]["security_review"] == "timeout"
+    assert out["review_stats"]["partial"] is True
+    assert "security_review" not in out["node_usage"]
+    out, _, _ = await _run(clean_env, "pt2", [PRF("a.py", {3, 4, 5, 6})])
+    assert out["review_stats"]["partial"] is False
+
+
+async def test_partial_flag_on_reviewer_exception(monkeypatch):
+    out, _, _ = await _run(monkeypatch, "pt3", [PRF("a.py", {3, 4, 5, 6})], {"tests": RuntimeError("x")})
+    assert out["review_stats"]["partial"] is True and "tests_review" not in out["node_usage"]

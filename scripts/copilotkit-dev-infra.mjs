@@ -144,8 +144,8 @@ if (resolveVendorKeyValue(process.env, envFileContent, 'GITHUB_TOKEN') === '') {
 // Warn when a configured model (COPILOTKIT_AGENT_MODEL or any per-step *_MODEL) uses a
 // provider whose API key is missing.
 const MODEL_VARS = [
-  'COPILOTKIT_AGENT_MODEL', 'REVIEWER_MODEL', 'LINT_MODEL', 'SECURITY_MODEL',
-  'TESTS_MODEL', 'REGRESSION_MODEL', 'SUMMARY_MODEL', 'CHAT_MODEL',
+  'COPILOTKIT_AGENT_MODEL', 'REVIEWER_MODEL', 'SECURITY_MODEL',
+  'TESTS_MODEL', 'CORRECTNESS_MODEL', 'REGRESSION_MODEL', 'SUMMARY_MODEL', 'CHAT_MODEL',
 ];
 const PROVIDER_KEYS = {
   anthropic: 'ANTHROPIC_API_KEY',
