@@ -57,6 +57,10 @@ class PullRequest:
     truncated: bool = False
 
 
+TITLE_LIMIT = 120
+EXPLANATION_LIMIT = 1000
+
+
 def parse_pr_url(url: str) -> tuple[str, str, int]:
     """Return ``(owner, repo, number)`` from a GitHub pull-request URL."""
     cleaned = url.strip().split("#", 1)[0].split("?", 1)[0]
@@ -106,9 +110,30 @@ def annotate_patch(patch: str) -> tuple[str, set[int]]:
     return "\n".join(out), valid
 
 
+def _neutralize(text: str, limit: int) -> str:
+    """Make untrusted text safe to post: no @-mentions, no raw HTML, bounded length."""
+    text = text.strip()
+    if len(text) > limit:
+        text = text[: limit - 1].rstrip() + "\u2026"
+    return text.replace("<", "&lt;").replace("@", "@\u200b")
+
+
 def format_suggestion(explanation: str, suggestion: str) -> str:
-    """Comment body: the explanation followed by a ```suggestion block."""
-    return f"{explanation.rstrip()}\n\n```suggestion\n{suggestion.rstrip(chr(10))}\n```"
+    """Comment body: the explanation followed by a ```suggestion block.
+
+    The fence is longer than any backtick run inside the suggestion so the code
+    cannot close it early.
+    """
+    code = suggestion.rstrip("\n")
+    longest = max((len(m) for m in re.findall(r"`+", code)), default=0)
+    fence = "`" * max(3, longest + 1)
+    return f"{explanation.rstrip()}\n\n{fence}suggestion\n{code}\n{fence}"
+
+
+def build_comment_body(title: str, explanation: str, suggestion: str) -> str:
+    """Full sanitized review-comment body for a finding (title in bold)."""
+    head = f"**{_neutralize(title, TITLE_LIMIT)}**\n\n{_neutralize(explanation, EXPLANATION_LIMIT)}"
+    return format_suggestion(head, suggestion)
 
 
 def _base_url() -> str:

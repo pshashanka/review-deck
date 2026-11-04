@@ -131,6 +131,10 @@ const pillStyle = (bg: string, color: string): React.CSSProperties => ({
 const MONO =
   "var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace)";
 
+// Long enough to cover a slow GitHub call so it cannot be double-submitted
+// (handle_action is idempotent as the backstop).
+const PENDING_TIMEOUT_MS = 20000;
+
 function ReviewButton({
   label,
   action,
@@ -146,12 +150,12 @@ function ReviewButton({
   resetKey: string;
 }) {
   const [pendingFor, setPendingFor] = useState<string | null>(null);
-  // Brief pending guard against double-clicks; clears when the finding or its
-  // status changes, so a failed action or index-reused card is not stuck.
+  // Pending guard against double-clicks; clears when the finding, its status
+  // or its error changes, so a failed action or index-reused card is not stuck.
   const pending = pendingFor === resetKey;
   useEffect(() => {
     if (pendingFor === null) return;
-    const t = setTimeout(() => setPendingFor(null), 2000);
+    const t = setTimeout(() => setPendingFor(null), PENDING_TIMEOUT_MS);
     return () => clearTimeout(t);
   }, [pendingFor]);
   const off = disabled || pending;
@@ -760,12 +764,32 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
       );
     },
 
+    Note: ({ props: rawProps }) => {
+      const text = (rawProps as Record<string, any>).text;
+      return (
+        <div
+          style={{
+            fontSize: "0.85rem",
+            color: c.muted,
+            whiteSpace: "pre-wrap",
+          }}
+        >
+          {typeof text === "string" ? text : ""}
+        </div>
+      );
+    },
+
     FindingCard: ({ props: rawProps }) => {
       // The binder resolves path bindings to plain values at runtime.
       const props = rawProps as Record<string, any>;
       const st = STATUS_STYLE[props.status] ?? STATUS_STYLE.open;
       const actionable = props.status === "open" || props.status === "approved";
-      const resetKey = `${props.findingId}:${props.status}`;
+      const resetKey = `${props.findingId}:${props.status}:${props.error ?? ""}`;
+      const commentUrl =
+        typeof props.commentUrl === "string" && /^https?:\/\//i.test(props.commentUrl)
+          ? props.commentUrl
+          : "";
+      const error = typeof props.error === "string" ? props.error : "";
       const suggestion =
         typeof props.suggestion === "string" ? props.suggestion : "";
 
@@ -776,6 +800,21 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
           statusStyle={st}
           suggestion={suggestion}
         >
+          {error && (
+            <div role="alert" style={{ fontSize: "0.8rem", color: "#991b1b" }}>
+              {error}
+            </div>
+          )}
+          {props.status === "applied" && commentUrl && (
+            <a
+              href={commentUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={{ fontSize: "0.8rem", color: "var(--primary)" }}
+            >
+              View comment
+            </a>
+          )}
           <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
             {suggestion && (
               <ReviewButton

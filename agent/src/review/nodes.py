@@ -1,5 +1,6 @@
 """Graph nodes, router and the ``render_review`` tool."""
 
+import asyncio
 import copy
 import json
 import logging
@@ -29,6 +30,7 @@ _PR_URL_RE = re.compile(r"https?://(?:www\.)?github\.com/[^/\s]+/[^/\s]+/pull/\d
 _SCHEMAS = Path(__file__).parent.parent / "a2ui" / "schemas"
 REVIEW_SCHEMA = a2ui.load_schema(_SCHEMAS / "review_schema.json")
 APPROVAL_SCHEMA = a2ui.load_schema(_SCHEMAS / "approval_schema.json")
+ACTION_SCHEMA = a2ui.load_schema(_SCHEMAS / "action_schema.json")
 
 
 # ---------------------------------------------------------------- helpers
@@ -500,26 +502,144 @@ async def summarize(state: ReviewState, config: RunnableConfig):
 
 async def render_findings(state: ReviewState, config: RunnableConfig):
     await _running(state, config, "render_findings")
+    args: dict[str, Any] = {}
+    action = state.get("action")
+    if action:  # compact per-action surface instead of the full review
+        args = {"finding_id": action["finding_id"], "note": action["note"], "index": action["index"]}
     return {
         "messages": [AIMessage(content="", tool_calls=[
-            {"name": "render_review", "args": {}, "id": str(uuid.uuid4())}
+            {"name": "render_review", "args": args, "id": str(uuid.uuid4())}
         ])],
+        "action": None,
         "node_status": {"render_findings": "done"},
     }
 
 
+def _as_dict(value: Any) -> dict:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def parse_action(tc: dict) -> tuple[str, str]:
+    """(action name, finding id) from a ``log_a2ui_event`` call; ``userAction`` may be nested."""
+    args = _as_dict(tc.get("args"))
+    if "userAction" in args:
+        args = _as_dict(args["userAction"]) or args
+    ctx = _as_dict(args.get("context"))
+    name, fid = args.get("name"), ctx.get("findingId")
+    return (name if isinstance(name, str) else ""), (fid if isinstance(fid, str) else "")
+
+
+def _github_error_text(e: github.GitHubError) -> str:
+    if e.status == 422:
+        return ("GitHub rejected the comment (the PR may have changed since the review "
+                "\u2014 re-run the review).")
+    if e.status in (401, 403):
+        return ("GitHub denied access. Check that GITHUB_TOKEN is set and has Pull requests "
+                "read/write access to this repository.")
+    return f"GitHub error: {e.message}"
+
+
+def _action_count(messages: list[AnyMessage]) -> int:
+    return sum(1 for m in messages if isinstance(m, AIMessage) for tc in m.tool_calls if tc["name"] == ACTION_TOOL)
+
+
+# (thread_id, finding_id) pairs with a post in progress; blocks concurrent double clicks.
+_IN_FLIGHT: set[tuple] = set()
+
+
 async def handle_action(state: ReviewState, config: RunnableConfig):
-    # STUB: real apply/dismiss logic arrives in Chunk 6.
+    """Apply a suggestion as a PR review comment, or dismiss a finding."""
     await _running(state, config, "handle_action", fresh=True)
-    tc = _action_tool_call(state["messages"]) or {}
-    name = (tc.get("args") or {}).get("name", "unknown")
-    return {
-        "messages": [AIMessage(content=f"Action received: {name}")],
-        "node_status": {RESET_KEY: True, "handle_action": "done"},
-    }
+    done = {RESET_KEY: True, "handle_action": "done"}
+
+    def reply(text: str, finding: dict | None = None):
+        out: dict[str, Any] = {"messages": [AIMessage(content=text)], "node_status": done}
+        if finding is not None:
+            out["findings"] = [finding]
+            out["action"] = {"finding_id": finding["id"], "note": text,
+                             "index": _action_count(state["messages"])}
+        return out
+
+    name, fid = parse_action(_action_tool_call(state["messages"]) or {})
+    if name not in ("apply_fix", "dismiss"):
+        return reply(f"I don't know how to handle the action \"{name or 'unknown'}\".")
+    finding = next((f for f in state.get("findings", []) if f["id"] == fid), None)
+    if finding is None:
+        return reply("I couldn't find that finding; it may be from an earlier review.")
+    where = f"{finding['file']}:{finding['line']}"
+    status = finding.get("status", "open")
+    if status in ("applied", "dismissed", "rejected"):
+        return reply(f"That finding is already {status}; nothing to do.")
+
+    if name == "dismiss":
+        return reply(f"Dismissed \"{finding['title']}\" ({where}).",
+                     {**finding, "status": "dismissed", "error": ""})
+
+    pr = state.get("pr") or {}
+    suggestion = finding.get("suggestion") or ""
+    if not suggestion.strip():
+        return reply("This finding has no suggested fix to apply.")
+    if not pr:
+        return reply("There is no active pull request to comment on.")
+    body = github.build_comment_body(finding["title"], finding["explanation"], suggestion)
+    key = ((config.get("configurable") or {}).get("thread_id"), fid)
+    if key in _IN_FLIGHT:
+        return reply("That fix is already being posted; hang on.")
+    _IN_FLIGHT.add(key)
+    try:
+        url = await asyncio.to_thread(
+            github.post_suggestion, pr["owner"], pr["repo"], pr["number"],
+            commit_id=pr["head_sha"], path=finding["file"], line=finding["line"], body=body,
+        )
+    except github.GitHubError as e:
+        error = _github_error_text(e)
+    except Exception:
+        logger.error("apply_fix failed for %s", fid, exc_info=True)
+        error = "Something went wrong while posting the suggestion; see the agent logs."
+    else:
+        _IN_FLIGHT.discard(key)
+        return reply(f"Posted suggestion on {where} \u2192 {url}",
+                     {**finding, "status": "applied", "comment_url": url, "error": ""})
+    _IN_FLIGHT.discard(key)
+    return reply(f"Couldn't post the suggestion on {where}: {error}", {**finding, "error": error})
 
 
 # ---------------------------------------------------------------- tool
+
+
+def _finding_data(f: dict) -> dict:
+    return {
+        "id": f["id"],
+        "severity": f["severity"],
+        "category": f["category"],
+        "title": f["title"],
+        "explanation": f["explanation"],
+        "file": f["file"],
+        "line": f["line"],
+        "suggestion": f.get("suggestion") or "",
+        "status": f.get("status", "open"),
+        "comment_url": f.get("comment_url") or "",
+        "error": f.get("error") or "",
+    }
+
+
+def build_action_ops(state: dict[str, Any], finding_id: str, note: str, index: int) -> list[dict] | None:
+    """Compact surface after an action: a one-line note plus the updated finding card."""
+    finding = next((f for f in state.get("findings", []) if f["id"] == finding_id), None)
+    if finding is None:
+        return None
+    sid = f"pr-review-{(state.get('pr') or {}).get('number', 0)}-action-{index}"
+    data = {"note": note, "findings": [_finding_data(finding)]}
+    return [
+        a2ui.create_surface(sid, catalog_id=CATALOG_ID),
+        a2ui.update_components(sid, copy.deepcopy(ACTION_SCHEMA)),
+        a2ui.update_data_model(sid, data),
+    ]
 
 
 def build_review_ops(state: dict[str, Any]) -> list[dict]:
@@ -538,20 +658,7 @@ def build_review_ops(state: dict[str, Any]) -> list[dict]:
         },
         "counts": counts,
         "summary": state.get("summary") or "",
-        "findings": [
-            {
-                "id": f["id"],
-                "severity": f["severity"],
-                "category": f["category"],
-                "title": f["title"],
-                "explanation": f["explanation"],
-                "file": f["file"],
-                "line": f["line"],
-                "suggestion": f.get("suggestion") or "",
-                "status": f.get("status", "open"),
-            }
-            for f in findings
-        ],
+        "findings": [_finding_data(f) for f in findings],
     }
     return [
         a2ui.create_surface(sid, catalog_id=CATALOG_ID),
@@ -585,6 +692,7 @@ def build_approval_ops(pr: dict[str, Any], high: list[dict], message: str) -> li
 
 
 @tool
-def render_review(runtime: ToolRuntime) -> str:
-    """Render the current PR review findings as an A2UI surface."""
-    return a2ui.render(build_review_ops(runtime.state))
+def render_review(runtime: ToolRuntime, finding_id: str = "", note: str = "", index: int = 0) -> str:
+    """Render the PR review findings (or, after an action, one updated finding) as an A2UI surface."""
+    ops = build_action_ops(runtime.state, finding_id, note, index) if finding_id else None
+    return a2ui.render(ops or build_review_ops(runtime.state))

@@ -15,6 +15,8 @@ class Finding(BaseModel):
     line: int
     suggestion: str | None = None
     status: Literal["open", "approved", "rejected", "applied", "dismissed"] = "open"
+    comment_url: str = ""
+    error: str = ""
 
 
 class FindingList(BaseModel):

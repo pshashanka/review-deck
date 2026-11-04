@@ -36,6 +36,8 @@
     "line": { "path": "line" },
     "suggestion": { "path": "suggestion" },
     "status": { "path": "status" },
+    "commentUrl": { "path": "comment_url" },
+    "error": { "path": "error" },
     "applyAction": {
       "event": { "name": "apply_fix", "context": { "findingId": { "path": "id" } } }
     },

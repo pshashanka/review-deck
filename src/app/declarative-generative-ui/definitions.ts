@@ -194,6 +194,14 @@ export const demonstrationCatalogDefinitions = {
     }),
   },
 
+  Note: {
+    description:
+      "A short muted note (line breaks preserved). Accepts a literal or a data-model path binding.",
+    props: z.object({
+      text: DynString,
+    }),
+  },
+
   FindingCard: {
     description:
       "A code-review finding card: severity, category, title, explanation, file:line, optional suggested fix, status, and Apply fix / Dismiss buttons. Use as a template item over a findings list.",
@@ -210,6 +218,12 @@ export const demonstrationCatalogDefinitions = {
       ),
       status: DynString.describe(
         "open | approved | applied | dismissed; buttons only act on open/approved.",
+      ),
+      commentUrl: DynString.optional().describe(
+        "URL of the posted GitHub comment (empty until applied).",
+      ),
+      error: DynString.optional().describe(
+        "Last apply error, human-readable (empty when none).",
       ),
       applyAction: ActionProp,
       dismissAction: ActionProp,

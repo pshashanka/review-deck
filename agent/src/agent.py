@@ -4,7 +4,7 @@ START -> route_intake -> handle_action | fetch_pr | chat
 fetch_pr -> [lint_review, security_review, tests_review] (parallel) -> approval_gate -> summarize
          -> render_findings -> render_tools (ToolNode: render_review) -> END
 fetch_pr (error) -> fetch_error -> END
-handle_action -> render_findings;  chat -> END
+handle_action -> render_findings (only when a finding changed) | END;  chat -> END
 """
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -28,7 +28,9 @@ _b.add_conditional_edges(
 _b.add_edge(["lint_review", "security_review", "tests_review"], "approval_gate")
 _b.add_edge("approval_gate", "summarize")
 _b.add_edge("summarize", "render_findings")
-_b.add_edge("handle_action", "render_findings")
+_b.add_conditional_edges(
+    "handle_action", lambda st: "render_findings" if st.get("action") else END, ["render_findings", END]
+)
 _b.add_edge("render_findings", "render_tools")
 _b.add_edge("render_tools", END)
 _b.add_edge("chat", END)

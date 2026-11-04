@@ -130,16 +130,132 @@ async def test_github_error(monkeypatch):
 
 async def test_action_routes_to_handle_action():
     args = {"name": "apply_fix", "surfaceId": "pr-review-7", "sourceComponentId": "b", "context": {}}
-    msgs = [
+    out = await graph.ainvoke({"messages": _action_msgs(args)}, cfg("t4"))
+    assert out["node_status"]["handle_action"] == "done"
+    assert "render_findings" not in out["node_status"]
+    assert any("couldn't find that finding" in getattr(m, "content", "") for m in out["messages"])
+
+
+def _action_msgs(args):
+    return [
         HumanMessage(content="hi"),
         AIMessage(content="", tool_calls=[{"name": "log_a2ui_event", "args": args, "id": "c1"}]),
-        ToolMessage(content='User performed action "apply_fix"', tool_call_id="c1"),
+        ToolMessage(content="User performed action", tool_call_id="c1"),
     ]
-    out = await graph.ainvoke({"messages": msgs}, cfg("t4"))
-    assert out["node_status"]["handle_action"] == "done"
-    assert out["node_status"]["render_findings"] == "done"
-    assert any(getattr(m, "content", "") == "Action received: apply_fix" for m in out["messages"])
-    assert isinstance(out["messages"][-1], ToolMessage)
+
+
+def _act(name, fid):
+    return {"name": name, "surfaceId": "pr-review-7", "sourceComponentId": "b", "context": {"findingId": fid}}
+
+
+async def _reviewed(monkeypatch, tid, suggestion="x = 1"):
+    outputs = {"lint": ReviewerOutput(findings=[RF(line=3, suggestion=suggestion)])}
+    out, *_ = await _run(
+        monkeypatch, tid, [PRF("a.py", {3, 4, 5}, "   3+x = 0\n   4+y\n   5+z")],
+        outputs={"lint": outputs["lint"], "security": ReviewerOutput(), "tests": ReviewerOutput()},
+    )
+    return out["findings"][0]
+
+
+async def _do(tid, name, fid):
+    return await graph.ainvoke({"messages": _action_msgs(_act(name, fid))}, cfg(tid))
+
+
+def _finding(out, fid):
+    return next(f for f in out["findings"] if f["id"] == fid)
+
+
+async def test_apply_fix_posts_suggestion(monkeypatch):
+    f = await _reviewed(monkeypatch, "a1")
+    calls = []
+
+    def fake_post(owner, repo, number, **kw):
+        calls.append((owner, repo, number, kw))
+        return "https://github.com/o/r/pull/7#discussion_r1"
+
+    monkeypatch.setattr(github, "post_suggestion", fake_post)
+    out = await _do("a1", "apply_fix", f["id"])
+    assert len(calls) == 1
+    owner, repo, number, kw = calls[0]
+    assert (owner, repo, number) == ("o", "r", 7)
+    assert (kw["commit_id"], kw["path"], kw["line"]) == ("abc", "a.py", 3)
+    assert "```suggestion\nx = 1\n```" in kw["body"] and f["title"] in kw["body"]
+    done = _finding(out, f["id"])
+    assert done["status"] == "applied" and done["comment_url"].endswith("discussion_r1")
+    assert any("Posted suggestion on a.py:3" in getattr(m, "content", "") for m in out["messages"])
+    ops = json.loads(out["messages"][-1].content)["a2ui_operations"]
+    assert all(op[k].get("surfaceId") == "pr-review-7-action-1" for op in ops for k in op if isinstance(op[k], dict))
+    data = next(op["updateDataModel"]["value"] for op in ops if "updateDataModel" in op)
+    assert [x["id"] for x in data["findings"]] == [f["id"]] and data["findings"][0]["status"] == "applied"
+    assert "Posted suggestion" in data["note"]
+
+    # second click: idempotent, no second post
+    out2 = await graph.ainvoke({"messages": _action_msgs(_act("apply_fix", f["id"]))}, cfg("a1"))
+    assert len(calls) == 1
+    assert any("already applied" in getattr(m, "content", "") for m in out2["messages"])
+
+
+async def test_apply_fix_without_suggestion(monkeypatch):
+    f = await _reviewed(monkeypatch, "a2", suggestion=None)
+    monkeypatch.setattr(github, "post_suggestion", lambda *a, **k: pytest.fail("must not post"))
+    out = await _do("a2", "apply_fix", f["id"])
+    assert _finding(out, f["id"])["status"] == "open"
+    assert any("no suggested fix" in getattr(m, "content", "") for m in out["messages"])
+
+
+@pytest.mark.parametrize("status,needle", [(422, "re-run the review"), (403, "GITHUB_TOKEN")])
+async def test_apply_fix_github_error(monkeypatch, status, needle):
+    f = await _reviewed(monkeypatch, f"a3-{status}")
+
+    def boom(*a, **k):
+        raise github.GitHubError("Unprocessable", status)
+
+    monkeypatch.setattr(github, "post_suggestion", boom)
+    out = await _do(f"a3-{status}", "apply_fix", f["id"])
+    got = _finding(out, f["id"])
+    assert got["status"] == "open" and needle in got["error"]
+    assert any(needle in getattr(m, "content", "") for m in out["messages"])
+    data = next(op["updateDataModel"]["value"] for op in json.loads(out["messages"][-1].content)["a2ui_operations"]
+                if "updateDataModel" in op)
+    assert needle in data["findings"][0]["error"]
+
+
+async def test_apply_fix_unexpected_error(monkeypatch):
+    f = await _reviewed(monkeypatch, "a3x")
+
+    def boom(*a, **k):
+        raise RuntimeError("secret-token-123")
+
+    monkeypatch.setattr(github, "post_suggestion", boom)
+    out = await _do("a3x", "apply_fix", f["id"])
+    got = _finding(out, f["id"])
+    assert got["status"] == "open" and "secret-token-123" not in got["error"] and got["error"]
+
+
+async def test_dismiss(monkeypatch):
+    f = await _reviewed(monkeypatch, "a4")
+    monkeypatch.setattr(github, "post_suggestion", lambda *a, **k: pytest.fail("must not post"))
+    out = await _do("a4", "dismiss", f["id"])
+    got = _finding(out, f["id"])
+    assert got["status"] == "dismissed" and not got["comment_url"]
+    out2 = await _do("a4", "apply_fix", f["id"])
+    assert _finding(out2, f["id"])["status"] == "dismissed"
+
+
+async def test_unknown_finding_and_action(monkeypatch):
+    await _reviewed(monkeypatch, "a5")
+    out = await _do("a5", "apply_fix", "nope")
+    assert any("couldn't find" in getattr(m, "content", "") for m in out["messages"])
+    out = await graph.ainvoke({"messages": _action_msgs(_act("explode", "x"))}, cfg("a5"))
+    assert any("don't know how" in getattr(m, "content", "") for m in out["messages"])
+
+
+def test_parse_action_variants():
+    inner = {"name": "dismiss", "context": {"findingId": "f"}}
+    assert nodes.parse_action({"args": inner}) == ("dismiss", "f")
+    assert nodes.parse_action({"args": json.dumps(inner)}) == ("dismiss", "f")
+    assert nodes.parse_action({"args": {"userAction": json.dumps(inner)}}) == ("dismiss", "f")
+    assert nodes.parse_action({"args": "garbage"}) == ("", "")
 
 
 def test_merge_findings():
@@ -250,6 +366,9 @@ def test_review_schema_paths_match_data_model():
     }
     ops = nodes.build_review_ops(state)
     data = next(op["updateDataModel"]["value"] for op in ops if "updateDataModel" in op)
+    assert data["findings"][0]["comment_url"] == "" and data["findings"][0]["error"] == ""
+    card = next(c for c in nodes.REVIEW_SCHEMA if c["id"] == "finding-card")
+    assert card["commentUrl"] == {"path": "comment_url"} and card["error"] == {"path": "error"}
     by_id = {c["id"]: c for c in nodes.REVIEW_SCHEMA}
 
     template_ids = set()
@@ -588,3 +707,78 @@ def test_create_chat_model_timeout_retries(monkeypatch, spec, attr):
     monkeypatch.delenv("COPILOTKIT_AGENT_MODEL", raising=False)
     m = create_chat_model(spec, timeout=7, max_retries=1)
     assert getattr(m, attr) == 7 and m.max_retries == 1
+
+
+def test_action_schema_binding_contract():
+    state = {
+        "pr": {"owner": "o", "repo": "r", "number": 3},
+        "findings": [{"id": "a", "category": "lint", "severity": "low", "title": "A", "explanation": "e",
+                      "file": "a.py", "line": 1, "suggestion": "s", "status": "applied"}],
+    }
+    ops = nodes.build_action_ops(state, "a", "Posted", 2)
+    assert all(op[k]["surfaceId"] == "pr-review-3-action-2" for op in ops for k in op if isinstance(op[k], dict))
+    data = next(op["updateDataModel"]["value"] for op in ops if "updateDataModel" in op)
+    ids = {c["id"] for c in nodes.ACTION_SCHEMA}
+    assert {"root", "note", "finding-card"} <= ids
+    for c in nodes.ACTION_SCHEMA:
+        paths: list[str] = []
+        _collect_paths({k: v for k, v in c.items() if k != "children"}, paths)
+        for path in paths:
+            if c["id"] == "finding-card":
+                assert path in data["findings"][0], path
+            else:
+                assert path.strip("/") in data
+    assert nodes.build_action_ops(state, "missing", "x", 1) is None
+
+
+def _catalog_names():
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).parents[2] / "src/app/declarative-generative-ui/definitions.ts").read_text()
+    body = src[src.index("demonstrationCatalogDefinitions = {"):]
+    return set(re.findall(r"^  ([A-Z]\w*): \{", body, re.M))
+
+
+def test_schema_components_exist_in_frontend_catalog():
+    names = _catalog_names()
+    assert {"FindingCard", "Note"} <= names
+    for schema in (nodes.REVIEW_SCHEMA, nodes.APPROVAL_SCHEMA, nodes.ACTION_SCHEMA):
+        used = {c["component"] for c in schema}
+        # Column/Row are layout components defined in the same catalog
+        assert used <= names, used - names
+
+
+def test_comment_body_sanitization():
+    body = github.build_comment_body("Hi @bob <b>", "cc @team/x and <script>", "x = 1")
+    assert "@bob" not in body and "@\u200bbob" in body and "@\u200bteam" in body
+    assert "<b>" not in body and "&lt;b>" in body and "<script>" not in body
+    assert body.endswith("```suggestion\nx = 1\n```")
+    long = github.build_comment_body("t" * 500, "e" * 5000, "x")
+    title, expl = long.split("\n\n")[0], long.split("\n\n")[1]
+    assert len(title) <= github.TITLE_LIMIT + 4 and len(expl) <= github.EXPLANATION_LIMIT
+    fenced = github.build_comment_body("t", "e", "a = \"\"\"```\"\"\"")
+    assert "````suggestion" in fenced and fenced.rstrip().endswith("````")
+    plain = github.format_suggestion("e", "x")
+    assert "```suggestion" in plain and "````" not in plain
+
+
+async def test_concurrent_apply_posts_once(monkeypatch):
+    import asyncio
+    import time
+
+    f = await _reviewed(monkeypatch, "a6")
+    calls = []
+
+    def slow_post(*a, **k):
+        calls.append(1)
+        time.sleep(0.3)
+        return "https://github.com/o/r/pull/7#r"
+
+    monkeypatch.setattr(github, "post_suggestion", slow_post)
+    msgs = {"messages": _action_msgs(_act("apply_fix", f["id"]))}
+    r1, r2 = await asyncio.gather(graph.ainvoke(msgs, cfg("a6")), graph.ainvoke(msgs, cfg("a6")))
+    assert len(calls) == 1
+    texts = [getattr(m, "content", "") for r in (r1, r2) for m in r["messages"]]
+    assert any("already being posted" in t for t in texts)
+    assert not nodes._IN_FLIGHT

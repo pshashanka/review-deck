@@ -50,3 +50,5 @@ class ReviewState(CopilotKitState):
     node_status: Annotated[dict[str, str], merge_dict]
     error: str | None
     review_errors: Annotated[list[str], merge_errors]
+    # Set by handle_action for render_findings (compact per-action surface); cleared there.
+    action: dict[str, Any] | None
