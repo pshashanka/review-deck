@@ -11,8 +11,7 @@ import { LangGraphHttpAgent } from "@copilotkit/runtime/langgraph";
 // speaks AG-UI directly. We talk to it via HttpAgent, not LangGraphAgent
 // (LangGraphAgent targets the LangGraph Platform / langgraph-cli dev
 // surface, which is a different protocol). Everything else — runtime
-// config, v2 endpoint wiring, MCP apps, openGenerativeUI, a2ui — mirrors
-// the reference demo.
+// config, v2 endpoint wiring and a2ui.
 // `LANGGRAPH_DEPLOYMENT_URL` is accepted alongside `AGENT_URL` for parity with
 // the langgraph-python / langgraph-js starters, whose `createDefaultAgent()`
 // reads both: the LangGraph docs teach `LANGGRAPH_DEPLOYMENT_URL`, so a reader
@@ -48,18 +47,8 @@ const runtime = new CopilotRuntime({
       }
     : { runner: new InMemoryAgentRunner() }),
   // --- /copilotkit:intelligence ---
-  openGenerativeUI: true,
   a2ui: {
     injectA2UITool: false,
-  },
-  mcpApps: {
-    servers: [
-      {
-        type: "http",
-        url: process.env.MCP_SERVER_URL || "https://mcp.excalidraw.com/mcp",
-        serverId: "example_mcp_app",
-      },
-    ],
   },
 });
 

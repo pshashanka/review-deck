@@ -459,7 +459,7 @@ async def summarize(state: ReviewState, config: RunnableConfig):
     counts = {s: sum(1 for f in findings if f["severity"] == s) for s in ("high", "medium", "low")}
     if not findings and not errors:
         reviewable = any(f["valid_lines"] for f in state.get("files", []))
-        summary = "No findings." if reviewable else "Nothing reviewable: no changed lines with patches in this PR."
+        summary = f"**Verdict: {verdict_for([])}**\n\nNo findings." if reviewable else "Nothing reviewable: no changed lines with patches in this PR."
         if reviewable and pr.get("truncated"):
             summary += "\n\nNote: the diff was truncated; files beyond the limit were not reviewed."
         if rejected:

@@ -14,6 +14,7 @@ import "@xyflow/react/dist/style.css";
 import "./review-flow.css";
 import { useAgent, UseAgentUpdate } from "@copilotkit/react-core/v2";
 import { useTheme } from "@/hooks/use-theme";
+import type { ReviewState, Severity } from "@/lib/types";
 
 type NodeStatus = "idle" | "running" | "done" | "error" | "interrupted";
 type FlowNodeData = { label: string; status: NodeStatus; minor?: boolean };
@@ -89,7 +90,6 @@ function StepNode({ data }: NodeProps<FlowNode>) {
 
 const nodeTypes = { step: StepNode };
 
-type Severity = "high" | "medium" | "low";
 const SEVERITY_STYLE: Record<Severity, string> = {
   high: "#ef4444",
   medium: "#f59e0b",
@@ -152,10 +152,8 @@ export function ReviewFlow() {
     return () => unsubscribe();
   }, [agent]);
 
-  const state: Record<string, unknown> = isRecord(agent.state)
-    ? agent.state
-    : {};
-  const nodeStatus: Record<string, unknown> = isRecord(state.node_status)
+  const state: Partial<ReviewState> = isRecord(agent.state) ? agent.state : {};
+  const nodeStatus: Record<string, string> = isRecord(state.node_status)
     ? state.node_status
     : {};
   const pr = isRecord(state.pr) ? state.pr : null;
@@ -222,8 +220,7 @@ export function ReviewFlow() {
   const counts: Record<Severity, number> = { high: 0, medium: 0, low: 0 };
   for (const f of findings) {
     if (!isRecord(f) || f.status === "rejected") continue;
-    if (f.severity === "high" || f.severity === "medium" || f.severity === "low")
-      counts[f.severity]++;
+    if (f.severity in counts) counts[f.severity]++;
   }
 
   const runningLabels = Object.keys(LABELS)
@@ -240,10 +237,9 @@ export function ReviewFlow() {
       : "Running";
   else if (nodeStatus.render_findings === "done") statusLine = "Done";
 
-  const str = (v: unknown) => (typeof v === "string" ? v : "");
-  const prUrl = str(pr?.url);
+  const prUrl = pr?.url ?? "";
   const safeUrl = /^https?:\/\//i.test(prUrl) ? prUrl : undefined;
-  const prTitle = str(pr?.title) || "Untitled PR";
+  const prTitle = pr?.title || "Untitled PR";
 
   return (
     <div className="h-full flex flex-col bg-[var(--background)] text-[var(--foreground)]">
@@ -279,8 +275,8 @@ export function ReviewFlow() {
               <span className="font-semibold">{prTitle}</span>
             )}
             <div className="text-xs text-[var(--muted-foreground)] mt-1">
-              {str(pr.owner)}/{str(pr.repo)}#{String(pr.number ?? "")}
-              {str(pr.author) && <> &middot; {str(pr.author)}</>}
+              {pr.owner}/{pr.repo}#{pr.number}
+              {pr.author && <> &middot; {pr.author}</>}
             </div>
           </div>
         )}

@@ -574,7 +574,7 @@ async def test_dedupe_happens_before_gate(monkeypatch):
     assert [f["id"] for f in value["findings"]] == [HIGH_ID]
     out = await graph.ainvoke(Command(resume={"decisions": {HIGH_ID: "reject"}}), cfg("ap7"))
     assert [f["id"] for f in out["findings"]] == [HIGH_ID]
-    assert out["summary"].startswith("No findings.")
+    assert out["summary"].startswith("**Verdict: Approve**\n\nNo findings.")
     assert "rejected" in out["summary"]
 
 
@@ -670,7 +670,7 @@ async def test_truncated_note(monkeypatch):
     assert "diff was truncated" in out["summary"]
     empty = {c: ReviewerOutput(findings=[]) for c in ("lint", "security", "tests")}
     out, _, summ = await _run(monkeypatch, "v7", [PRF("a.py", {3})], empty, truncated=True)
-    assert out["summary"].startswith("No findings.") and "truncated" in out["summary"]
+    assert out["summary"].startswith("**Verdict: Approve**\n\nNo findings.") and "truncated" in out["summary"]
     assert summ.calls == []
 
 

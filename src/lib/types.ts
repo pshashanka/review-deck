@@ -1,4 +1,50 @@
-// State of the agent, make sure this aligns with your agent's state.
-export type AgentState = {
-  proverbs: string[];
+// Mirrors agent/src/review/state.py (ReviewState) and agent/src/review/models.py (Finding).
+
+export type Severity = "high" | "medium" | "low";
+export type FindingCategory = "lint" | "security" | "tests";
+export type FindingStatus =
+  | "open"
+  | "approved"
+  | "rejected"
+  | "applied"
+  | "dismissed";
+
+export type Finding = {
+  id: string;
+  category: FindingCategory;
+  severity: Severity;
+  title: string;
+  explanation: string;
+  file: string;
+  line: number;
+  suggestion?: string | null;
+  status: FindingStatus;
+  comment_url?: string;
+  error?: string;
+};
+
+export type PullRequestInfo = {
+  owner: string;
+  repo: string;
+  number: number;
+  title: string;
+  author: string;
+  url: string;
+  head_sha?: string;
+  base_ref?: string;
+  head_ref?: string;
+  truncated?: boolean;
+};
+
+export type NodeStatusValue = "running" | "done" | "error";
+
+export type ReviewState = {
+  pr: PullRequestInfo | null;
+  // Present in the graph state; large (annotated diffs), rarely needed by the UI.
+  files?: { filename: string; status: string }[];
+  findings: Finding[];
+  summary: string | null;
+  node_status: Record<string, NodeStatusValue>;
+  review_errors: string[];
+  error: string | null;
 };

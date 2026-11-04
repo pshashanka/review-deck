@@ -15,7 +15,7 @@ export default function RootLayout({
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
-        <title>CopilotKit</title>
+        <title>review-deck</title>
         <link
           rel="icon"
           type="image/svg+xml"
@@ -47,7 +47,6 @@ export default function RootLayout({
           <CopilotKit
             runtimeUrl="/api/copilotkit"
             a2ui={{ catalog: demonstrationCatalog }}
-            openGenerativeUI={{}}
             useSingleEndpoint={false}
           >
             {children}

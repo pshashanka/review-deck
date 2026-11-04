@@ -130,4 +130,15 @@ if (intelligenceFailures.length > 0) {
   );
 }
 
+// GITHUB_TOKEN is optional: without it, public PRs still review (rate-limited)
+// but private repos fail and "Apply fix" cannot post suggestion comments.
+if (resolveVendorKeyValue(process.env, envFileContent, 'GITHUB_TOKEN') === '') {
+  console.warn(
+    '⚠ GITHUB_TOKEN is not set — private repos and "Apply fix" (posting suggestions) will not work, and public PR fetches are rate-limited.',
+  );
+  console.warn(
+    '  Fine-grained token with Pull requests read/write + Contents read; add to .env:  GITHUB_TOKEN=github_pat_...',
+  );
+}
+
 process.exit(0);

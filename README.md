@@ -1,129 +1,86 @@
-# CopilotKit <> LangGraph Starter
+# review-deck
 
-This is a starter template for building AI agents using [LangGraph](https://www.langchain.com/langgraph) and [CopilotKit](https://copilotkit.ai). It provides a modern Next.js application with an integrated LangGraph agent to be built on top of.
+A PR-review agent built on CopilotKit and LangGraph. Paste a GitHub PR URL and three LLM reviewers (lint, security, tests) run in parallel over the line-numbered diff. High-severity findings pause the graph for your approval. Findings then render as cards where you can **Apply fix**, which posts a GitHub `suggestion` review comment, or **Dismiss**. A live graph panel shows which node is running.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    A[route_intake] -->|PR URL| B[fetch_pr]
+    A -->|button click| H[handle_action]
+    A -->|other chat| C[chat]
+    B -->|fetch failed| E[fetch_error]
+    B --> L[lint_review]
+    B --> S[security_review]
+    B --> T[tests_review]
+    L --> G{{"approval_gate<br/>(interrupt on high severity)"}}
+    S --> G
+    T --> G
+    G --> M[summarize<br/>deterministic verdict]
+    M --> R[render_findings]
+    H --> R
+    R --> U[render_review tool<br/>A2UI surface]
+```
+
+- `agent/` is the Python LangGraph agent, served over AG-UI by FastAPI on port 8123.
+- `src/` is the Next.js 16 frontend (CopilotKit 1.79). `/api/copilotkit` proxies to the agent.
+- A2UI schemas are in `agent/src/a2ui/schemas/`. The matching React catalog is in `src/app/declarative-generative-ui/`.
+- The approval form uses `interrupt()`. The run resumes from the checkpoint once you submit your decisions.
+- The active thread lives in the URL (`?thread=`), so a reload reconnects to the same review.
 
 ## Prerequisites
 
-- Node.js 18+
-- Python 3.8+
-- Poetry 2+
-- Any of the following package managers:
-  - npm (default)
-  - [pnpm](https://pnpm.io/installation)
-  - [yarn](https://classic.yarnpkg.com/lang/en/docs/install/)
-  - [bun](https://bun.sh/)
-- OpenAI API Key (for the LangGraph agent)
+- Node 20+
+- Python 3.12+
+- [uv](https://docs.astral.sh/uv/)
 
-## Getting Started
-
-1. Install dependencies using your preferred package manager:
+## Setup
 
 ```bash
-# Using npm (default)
-npm install
-
-# Using pnpm
-pnpm install
-
-# Using yarn
-yarn install
-
-# Using bun
-bun install
-```
-
-2. Install Python dependencies for the LangGraph agent:
-
-```bash
-# Using npm (default)
-npm run install:agent
-
-# Using pnpm
-pnpm install:agent
-
-# Using yarn
-yarn install:agent
-
-# Using bun
-bun run install:agent
-```
-
-3. Set up your model key:
-
-```bash
+npm install            # also runs `uv sync` in agent/
 cp .env.example .env
-# Add the key of the model provider in .env. COPILOTKIT_AGENT_MODEL chooses
-# the provider and model, for example anthropic:claude-sonnet-4-5.
 ```
 
-4. Start the development server:
+Edit `.env`:
+
+| Variable | Notes |
+| --- | --- |
+| `OPENAI_API_KEY` | Required (for the default model). |
+| `COPILOTKIT_AGENT_MODEL` | Optional, `<provider>:<model>` (openai, anthropic, google). Default `openai:gpt-5.4`. Set the matching provider key for non-OpenAI models. |
+| `GITHUB_TOKEN` | Fine-grained token with Pull requests read/write and Contents read. Needed for private repos and for Apply fix. Public PRs can be reviewed without it, but rate-limited. |
+| `CPK_INTELLIGENCE_API_KEY` etc. | Optional. Enables the CopilotKit Intelligence threads drawer. Without it, an in-memory runner is used. |
+
+## Run
 
 ```bash
-# Using npm (default)
 npm run dev
-
-# Using pnpm
-pnpm dev
-
-# Using yarn
-yarn dev
-
-# Using bun
-bun run dev
 ```
 
-This will start both the UI and agent servers concurrently.
+UI at http://localhost:3000, agent at http://localhost:8123. Startup prints warnings for missing keys.
 
-## Available Scripts
+## Usage
 
-The following scripts can also be run using your preferred package manager:
+1. Send `Review https://github.com/psf/requests/pull/6710` (or click a suggestion pill).
+2. Watch the graph panel (App mode) as the reviewers run.
+3. If there are high-severity findings, an approval form appears. Approve or reject each one, then submit.
+4. Read the summary (with a verdict: Approve, Approve with nits, or Request changes) and the finding cards.
+5. **Apply fix** posts a suggestion comment on the PR. **Dismiss** hides the finding.
+6. **New review** starts a fresh thread.
 
-- `dev` - Starts both UI and agent servers in development mode
-- `dev:debug` - Starts development servers with debug logging enabled
-- `dev:ui` - Starts only the Next.js UI server
-- `dev:agent` - Starts only the LangGraph agent server
-- `build` - Builds the Next.js application for production
-- `start` - Starts the production server
-- `install:agent` - Installs Python dependencies for the agent
+## Tests
 
-## Documentation
+```bash
+cd agent && uv run pytest
+```
 
-The main UI component is in `src/app/page.tsx`. You can:
+## Known limitations
 
-- Modify the theme colors and styling
-- Add new frontend actions
-- Customize the CopilotKit sidebar appearance
-
-## 📚 Documentation
-
-- [LangGraph Documentation](https://langchain-ai.github.io/langgraph/) - Learn more about LangGraph and its features
-- [CopilotKit Documentation](https://docs.copilotkit.ai) - Explore CopilotKit's capabilities
-- [Next.js Documentation](https://nextjs.org/docs) - Learn about Next.js features and API
-- [YFinance Documentation](https://pypi.org/project/yfinance/) - Financial data tools
-
-## Contributing
-
-Feel free to submit issues and enhancement requests! This starter is designed to be easily extensible.
+- State is checkpointed in memory (`MemorySaver`). Restarting the agent loses threads and pending approvals.
+- Reviews vary from run to run because they come from LLMs.
+- Suggestions are single-line replacements.
+- After Apply fix or Dismiss, the result re-renders as a new compact surface rather than updating the card in place.
+- Chat messages typed while the approval form is open are ignored.
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
-
-## Troubleshooting
-
-### Agent Connection Issues
-
-If you see "I'm having trouble connecting to my tools", make sure:
-
-1. The LangGraph agent is running on port 8000
-2. Your OpenAI API key is set correctly
-3. Both servers started successfully
-
-### Python Dependencies
-
-If you encounter Python import errors:
-
-```bash
-cd agent
-poetry lock && poetry install
-```
+MIT, inherited from the CopilotKit + LangGraph starter this project was based on. See [LICENSE](LICENSE).
