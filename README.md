@@ -1,6 +1,6 @@
 # review-deck
 
-A PR-review agent built on CopilotKit and LangGraph. Paste a GitHub PR URL and three LLM reviewers (security, tests, correctness) run in parallel over the line-numbered diff. Style and lint are left to free static tools in CI (ruff, eslint, etc.). High-severity findings pause the graph for your approval. Findings then render as cards where you can **Apply fix**, which posts a GitHub `suggestion` review comment, or **Dismiss**. A live graph panel shows which node is running.
+A PR-review agent built on CopilotKit and LangGraph. Paste a GitHub PR URL and three LLM reviewers (security, tests, correctness) run in parallel over the line-numbered diff. Style and lint are left to free static tools in CI (ruff, eslint, etc.). High-severity findings pause the graph for your approval. Findings then render as cards where you can **Apply fix** (posts a GitHub `suggestion` review comment; **Post comment** when there is no suggestion) or **Dismiss**. A live graph panel shows which node is running.
 
 ## Architecture
 
@@ -29,7 +29,7 @@ flowchart TD
 - `agent/` is the Python LangGraph agent, served over AG-UI by FastAPI (default port 8123, `PORT` to change). `agent/src/endpoint.py` cancels the graph when the client disconnects (Stop).
 - `src/` is the Next.js 16 frontend (CopilotKit 1.79). `/api/copilotkit` proxies to the agent at `AGENT_URL`.
 - A2UI schemas are in `agent/src/a2ui/schemas/`. The matching React catalog is in `src/app/declarative-generative-ui/`.
-- `handle_action` handles the Apply fix / Dismiss button events. It goes to END with only a chat message when no finding changed (unknown action, finding not found, already applied/dismissed/rejected, no suggestion).
+- `handle_action` handles the Apply fix / Dismiss button events. It goes to END with only a chat message when no finding changed (unknown action, finding not found, already applied/dismissed/rejected).
 - The approval form uses `interrupt()`. The run resumes from the checkpoint once you submit your decisions.
 - The active thread lives in the URL (`?thread=`), so a reload reconnects to the same review.
 
@@ -113,7 +113,7 @@ UI at http://localhost:3000, agent at http://localhost:8123. Startup prints warn
 2. Watch the graph panel (App mode) as the reviewers run; each LLM node shows its model.
 3. If there are high-severity findings, an approval form appears. Approve or reject each one, then submit. Rejected findings are excluded from the summary and cards.
 4. Read the summary (with a verdict: Approve, Approve with nits, or Request changes) and the finding cards.
-5. **Apply fix** (only shown when the finding has a suggestion) posts a single-line GitHub ```` ```suggestion ```` review comment on the cited line of the PR head commit.
+5. **Apply fix** posts a single-line GitHub ```` ```suggestion ```` review comment on the cited line of the PR head commit; findings without a suggestion show **Post comment**, which posts just the title and explanation.
    - Idempotent: an already applied finding is not posted again. An in-flight guard blocks double clicks.
    - The result renders as a new compact card message (with a "View comment" link) rather than updating the original card.
    - Errors show on the card, e.g. 422 (PR changed since the review; re-run it) or 401/403 (token missing or lacks Pull requests write). The finding stays actionable.

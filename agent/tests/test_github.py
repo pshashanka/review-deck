@@ -8,6 +8,7 @@ import pytest
 from src.github import (
     GitHubError,
     annotate_patch,
+    build_comment_body,
     fetch_pr,
     format_suggestion,
     parse_pr_url,
@@ -370,3 +371,15 @@ def test_non_json_success_and_missing_filename():
 
     with pytest.raises(GitHubError, match="Unexpected GitHub response"):
         fetch_pr("o", "r", 7, client=make_client(no_name))
+
+
+@pytest.mark.parametrize("empty", ["", "  ", None])
+def test_build_comment_body_without_suggestion(empty):
+    body = build_comment_body("Bad @thing", "Because <x>", empty)
+    assert body.startswith("**Bad @\u200bthing**")
+    assert "&lt;x" in body
+    assert "```" not in body
+
+
+def test_build_comment_body_with_suggestion():
+    assert "```suggestion" in build_comment_body("T", "E", "x = 1")

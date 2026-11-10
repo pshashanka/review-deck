@@ -197,10 +197,21 @@ async def test_apply_fix_posts_suggestion(monkeypatch):
 
 async def test_apply_fix_without_suggestion(monkeypatch):
     f = await _reviewed(monkeypatch, "a2", suggestion=None)
-    monkeypatch.setattr(github, "post_suggestion", lambda *a, **k: pytest.fail("must not post"))
+    calls = []
+
+    def fake_post(owner, repo, number, **kw):
+        calls.append(kw)
+        return "https://example/c/1"
+
+    monkeypatch.setattr(github, "post_suggestion", fake_post)
     out = await _do("a2", "apply_fix", f["id"])
-    assert _finding(out, f["id"])["status"] == "open"
-    assert any("no suggested fix" in getattr(m, "content", "") for m in out["messages"])
+    assert len(calls) == 1
+    kw = calls[0]
+    assert kw["path"] == f["file"] and kw["line"] == f["line"] and kw["commit_id"]
+    assert f["title"] in kw["body"] and f["explanation"] in kw["body"]
+    assert "```suggestion" not in kw["body"]
+    assert _finding(out, f["id"])["status"] == "applied"
+    assert any("Posted comment on a.py:3" in getattr(m, "content", "") for m in out["messages"])
 
 
 @pytest.mark.parametrize("status,needle", [(422, "re-run the review"), (403, "GITHUB_TOKEN")])

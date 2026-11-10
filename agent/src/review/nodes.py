@@ -738,12 +738,12 @@ def _action_count(messages: list[AnyMessage]) -> int:
     return sum(1 for m in messages if isinstance(m, AIMessage) for tc in m.tool_calls if tc["name"] == ACTION_TOOL)
 
 
-# (thread_id, finding_id) pairs with a post in progress; blocks concurrent double clicks.
+# (thread_id, finding_id) pairs with a comment post in progress; blocks concurrent double clicks.
 _IN_FLIGHT: set[tuple] = set()
 
 
 async def handle_action(state: ReviewState, config: RunnableConfig):
-    """Apply a suggestion as a PR review comment, or dismiss a finding."""
+    """Post a finding as a PR review comment (with a suggestion block if it has one), or dismiss it."""
     await _running(state, config, "handle_action", fresh=True)
     done = {RESET_KEY: True, "handle_action": "done"}
 
@@ -775,14 +775,12 @@ async def handle_action(state: ReviewState, config: RunnableConfig):
 
     pr = state.get("pr") or {}
     suggestion = finding.get("suggestion") or ""
-    if not suggestion.strip():
-        return reply("This finding has no suggested fix to apply.")
     if not pr:
         return reply("There is no active pull request to comment on.")
     body = github.build_comment_body(finding["title"], finding["explanation"], suggestion)
     key = ((config.get("configurable") or {}).get("thread_id"), fid)
     if key in _IN_FLIGHT:
-        return reply("That fix is already being posted; hang on.")
+        return reply("That comment is already being posted; hang on.")
     _IN_FLIGHT.add(key)
     try:
         url = await asyncio.to_thread(
@@ -793,13 +791,14 @@ async def handle_action(state: ReviewState, config: RunnableConfig):
         error = _github_error_text(e)
     except Exception:
         logger.error("apply_fix failed for %s", fid, exc_info=True)
-        error = "Something went wrong while posting the suggestion; see the agent logs."
+        error = "Something went wrong while posting the comment; see the agent logs."
     else:
         _IN_FLIGHT.discard(key)
-        return reply(f"Posted suggestion on {where} \u2192 {url}",
+        kind = "suggestion" if suggestion.strip() else "comment"
+        return reply(f"Posted {kind} on {where} \u2192 {url}",
                      {**finding, "status": "applied", "comment_url": url, "error": ""})
     _IN_FLIGHT.discard(key)
-    return reply(f"Couldn't post the suggestion on {where}: {error}", {**finding, "error": error})
+    return reply(f"Couldn't post the comment on {where}: {error}", {**finding, "error": error})
 
 
 # ---------------------------------------------------------------- tool

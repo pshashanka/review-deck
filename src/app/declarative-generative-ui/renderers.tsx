@@ -456,15 +456,13 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
             </a>
           )}
           <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
-            {suggestion && (
-              <ReviewButton
-                label="Apply fix"
-                action={props.applyAction}
-                disabled={!actionable}
-                primary
-                resetKey={resetKey}
-              />
-            )}
+            <ReviewButton
+              label={suggestion ? "Apply fix" : "Post comment"}
+              action={props.applyAction}
+              disabled={!actionable}
+              primary
+              resetKey={resetKey}
+            />
             <ReviewButton
               label="Dismiss"
               action={props.dismissAction}

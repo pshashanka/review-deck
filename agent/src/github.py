@@ -134,9 +134,14 @@ def format_suggestion(explanation: str, suggestion: str) -> str:
     return f"{explanation.rstrip()}\n\n{fence}suggestion\n{code}\n{fence}"
 
 
-def build_comment_body(title: str, explanation: str, suggestion: str) -> str:
-    """Full sanitized review-comment body for a finding (title in bold)."""
+def build_comment_body(title: str, explanation: str, suggestion: str | None = None) -> str:
+    """Full sanitized review-comment body for a finding (title in bold).
+
+    With an empty/None suggestion the body is just the title and explanation (no suggestion block).
+    """
     head = f"**{_neutralize(title, TITLE_LIMIT)}**\n\n{_neutralize(explanation, EXPLANATION_LIMIT)}"
+    if not suggestion or not suggestion.strip():
+        return head
     return format_suggestion(head, suggestion)
 
 
