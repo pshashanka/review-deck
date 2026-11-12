@@ -7,6 +7,7 @@ import pytest
 
 from src.github import (
     GitHubError,
+    fetch_discussion,
     annotate_patch,
     build_comment_body,
     fetch_pr,
@@ -383,3 +384,174 @@ def test_build_comment_body_without_suggestion(empty):
 
 def test_build_comment_body_with_suggestion():
     assert "```suggestion" in build_comment_body("T", "E", "x = 1")
+
+
+# ---- fetch_discussion ----
+
+def _disc_handler(issue=(), reviews=(), inline=(), graphql=None, seen=None):
+    def handler(req):
+        if seen is not None:
+            seen.append(req)
+        p = req.url.path
+        if p.endswith("/graphql"):
+            return graphql(req)
+        for suffix, data in (
+            ("/issues/7/comments", issue),
+            ("/pulls/7/reviews", reviews),
+            ("/pulls/7/comments", inline),
+        ):
+            if p.endswith(suffix):
+                if isinstance(data, httpx.Response):
+                    return data
+                return httpx.Response(200, json=list(data))
+        raise AssertionError(p)
+
+    return handler
+
+
+def _issue(body, login="alice", typ="User", at="2024-01-02T00:00:00Z", **kw):
+    return {"user": {"login": login, "type": typ}, "body": body, "created_at": at,
+            "html_url": "https://github.com/o/r/pull/7#c", **kw}
+
+
+def test_discussion_mapping_all_sources():
+    h = _disc_handler(
+        issue=[_issue("hello", "bugbot", "Bot")],
+        reviews=[{"user": {"login": "dependabot[bot]", "type": "User"}, "body": "LGTM",
+                  "submitted_at": "2024-01-03T00:00:00Z", "created_at": "ignored", "id": 9,
+                  "html_url": "https://github.com/o/r/pull/7#r"},
+                 {"user": {"login": "bob"}, "body": "  \n ", "submitted_at": "2024-01-04T00:00:00Z"}],
+        inline=[_issue("nit", "carol", id=5, path="a.py", line=12),
+                _issue("old", "carol", at="2024-01-01T00:00:00Z", id=6, path="b.py", line=None)],
+    )
+    d = fetch_discussion("o", "r", 7, client=make_client(h))
+    assert d.errors == [] and not d.truncated and not d.resolved_known
+    assert [(c.kind, c.author, c.is_bot) for c in d.comments] == [
+        ("inline", "carol", False), ("issue", "bugbot", True), ("inline", "carol", False),
+        ("review", "dependabot[bot]", True),
+    ]
+    old, issue, inline, review = d.comments
+    assert (old.path, old.line, old.outdated) == ("b.py", None, True)
+    assert (old.comment_id, inline.comment_id, review.comment_id, issue.comment_id) == (6, 5, 9, None)
+    assert (inline.path, inline.line, inline.outdated) == ("a.py", 12, False)
+    assert review.created_at == "2024-01-03T00:00:00Z" and review.url.endswith("#r")
+    assert issue.url == "https://github.com/o/r/pull/7#c" and issue.path is None
+
+
+def test_discussion_missing_fields_default():
+    h = _disc_handler(issue=[{"body": "x"}])
+    (c,) = fetch_discussion("o", "r", 7, client=make_client(h)).comments
+    assert (c.author, c.created_at, c.url, c.is_bot) == ("", "", "", False)
+
+
+def test_discussion_html_comment_cleaning():
+    h = _disc_handler(issue=[
+        _issue("before <!-- hidden\nmeta --> after\n\n\n\n\nend", at="2024-01-01T00:00:00Z"),
+        _issue("<!-- only\nmeta -->\n", at="2024-01-02T00:00:00Z"),
+    ])
+    d = fetch_discussion("o", "r", 7, client=make_client(h))
+    assert [c.body for c in d.comments] == ["before  after\n\nend"]
+
+
+def test_discussion_per_comment_truncation():
+    h = _disc_handler(issue=[_issue("x" * 50)])
+    (c,) = fetch_discussion("o", "r", 7, client=make_client(h), max_comment_chars=10).comments
+    assert len(c.body) == 10 and c.body.endswith("\u2026")
+
+
+def test_discussion_total_budget_drops_oldest():
+    h = _disc_handler(issue=[
+        _issue("c" * 10, at="2024-01-03T00:00:00Z"),
+        _issue("a" * 10, at="2024-01-01T00:00:00Z"),
+        _issue("b" * 10, at="2024-01-02T00:00:00Z"),
+    ])
+    d = fetch_discussion("o", "r", 7, client=make_client(h), max_total_chars=20)
+    assert [c.body[0] for c in d.comments] == ["b", "c"]
+    assert d.truncated is True
+
+
+def _threads(resolved_ids, unresolved_ids=()):
+    return {"data": {"repository": {"pullRequest": {"reviewThreads": {
+        "pageInfo": {"hasNextPage": False, "endCursor": None},
+        "nodes": [
+            {"isResolved": True, "comments": {"nodes": [{"databaseId": i} for i in resolved_ids]}},
+            {"isResolved": False, "comments": {"nodes": [{"databaseId": i} for i in unresolved_ids]}},
+        ]}}}}}
+
+
+def test_discussion_graphql_resolved_excluded(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    seen = []
+    h = _disc_handler(
+        inline=[_issue("resolved", id=1, path="a.py", line=1), _issue("open", id=2, path="a.py", line=2)],
+        graphql=lambda req: httpx.Response(200, json=_threads([1], [2])),
+        seen=seen,
+    )
+    d = fetch_discussion("o", "r", 7, client=make_client(h))
+    assert [c.body for c in d.comments] == ["open"]
+    assert d.resolved_known is True and d.errors == []
+    (gql,) = [r for r in seen if r.url.path.endswith("/graphql")]
+    assert str(gql.url) == "https://api.github.com/graphql"
+    assert gql.headers["authorization"] == "Bearer tok"
+    variables = json.loads(gql.content)["variables"]
+    assert (variables["owner"], variables["name"], variables["number"]) == ("o", "r", 7)
+
+
+def test_discussion_graphql_skipped_without_token():
+    def boom(req):
+        raise AssertionError("graphql must not be called")
+
+    h = _disc_handler(inline=[_issue("x", id=1, path="a.py", line=1)], graphql=boom)
+    d = fetch_discussion("o", "r", 7, client=make_client(h))
+    assert d.resolved_known is False and len(d.comments) == 1
+
+
+def test_discussion_graphql_errors_payload(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    h = _disc_handler(
+        inline=[_issue("x", id=1, path="a.py", line=1)],
+        graphql=lambda req: httpx.Response(200, json={"errors": [{"message": "boom"}]}),
+    )
+    d = fetch_discussion("o", "r", 7, client=make_client(h))
+    assert d.resolved_known is False and len(d.comments) == 1
+    assert len(d.errors) == 1 and "resolved threads" in d.errors[0]
+
+
+def test_discussion_rest_source_failure_isolated():
+    h = _disc_handler(
+        issue=[_issue("kept")],
+        reviews=httpx.Response(500, json={"message": "oops"}),
+        inline=httpx.Response(200, json={"not": "a list"}),
+    )
+    d = fetch_discussion("o", "r", 7, client=make_client(h))
+    assert [c.body for c in d.comments] == ["kept"]
+    assert len(d.errors) == 2
+    assert d.errors[0].startswith("reviews:") and "500" in d.errors[0]
+    assert d.errors[1].startswith("inline comments:")
+
+
+def test_discussion_ghe_graphql_url(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "tok")
+    monkeypatch.setenv("GITHUB_API_URL", "https://ghe.example/api/v3")
+    seen = []
+    h = _disc_handler(graphql=lambda req: httpx.Response(200, json=_threads([])), seen=seen)
+    d = fetch_discussion("o", "r", 7, client=make_client(h))
+    assert d.resolved_known is True
+    assert [str(r.url) for r in seen if r.url.path.endswith("/graphql")] == [
+        "https://ghe.example/api/graphql"
+    ]
+
+
+def test_discussion_pagination_via_link_header():
+    def handler(req):
+        if not req.url.path.endswith("/issues/7/comments"):
+            return httpx.Response(200, json=[])
+        if req.url.params.get("page") == "2":
+            return httpx.Response(200, json=[_issue("two")])
+        return httpx.Response(
+            200, json=[_issue("one")],
+            headers={"Link": '<https://api.github.com/repos/o/r/issues/7/comments?per_page=100&page=2>; rel="next"'},
+        )
+
+    d = fetch_discussion("o", "r", 7, client=make_client(handler))
+    assert [c.body for c in d.comments] == ["one", "two"]
