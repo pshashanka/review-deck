@@ -76,6 +76,12 @@ def fakes(monkeypatch):
     return reviewer, summary
 
 
+@pytest.fixture(autouse=True)
+def no_discussion(monkeypatch):
+    """Never hit the network for PR discussion; tests that need comments override this."""
+    monkeypatch.setattr(github, "fetch_discussion", lambda *a, **k: github.Discussion(comments=[]))
+
+
 def cfg(tid):
     return {"configurable": {"thread_id": tid}}
 
@@ -1454,3 +1460,167 @@ async def test_partial_flag_on_timeout_and_clean_run(clean_env):
 async def test_partial_flag_on_reviewer_exception(monkeypatch):
     out, _, _ = await _run(monkeypatch, "pt3", [PRF("a.py", {3, 4, 5, 6})], {"tests": RuntimeError("x")})
     assert out["review_stats"]["partial"] is True and "tests_review" not in out["node_usage"]
+
+
+# ---------------------------------------------------------------- PR discussion
+
+
+def _c(kind="issue", body="hello", author="alice", is_bot=False, path=None, line=None, outdated=False):
+    return github.Comment(kind=kind, author=author, is_bot=is_bot, body=body, created_at="t", url="u",
+                          path=path, line=line, outdated=outdated)
+
+
+def _dstate(comments, truncated=False):
+    import dataclasses
+    d = {"comments": [dataclasses.asdict(c) for c in comments], "truncated": truncated, "resolved_known": True}
+    return {"pr": {"title": "T"}, "files": [
+        _vf("README.md", {1}, "   1+a"), _vf("src/a.py", {42}, "  42+b")], "discussion": d}
+
+
+def test_discussion_inline_unknown_line_renders_path_only():
+    state = _dstate([_c("inline", "where?", author="bob", path="src/a.py", line=None, outdated=False)])
+    t = nodes.build_diff_prompt(state, None)[0]
+    assert "inline comment by bob on src/a.py:\nwhere?" in t
+    assert "outdated" not in t
+
+
+def test_discussion_prompt_kinds_and_scoping():
+    state = _dstate([
+        _c("issue", "bug here", author="cursor[bot]", is_bot=True),
+        _c("review", "looks off", author="alice"),
+        _c("inline", "readme nit", author="bob", path="README.md", line=1),
+        _c("inline", "py nit", author="bob", path="src/a.py", line=42),
+        _c("inline", "old", author="carol", path="src/a.py", outdated=True),
+    ])
+    texts = {cat: nodes.build_diff_prompt(state, cat)[0] for cat in ("security", "tests", "correctness")}
+    for cat, t in texts.items():
+        assert "<pr_discussion>" in t and t.rstrip().endswith("</pr_discussion>")
+        assert "PR comment by cursor[bot] (bot):\nbug here" in t
+        assert "review by alice:\nlooks off" in t
+        assert "inline comment by bob on src/a.py:42:\npy nit" in t
+        assert "inline comment by carol on src/a.py (outdated; no longer in the diff):\nold" in t
+        assert "(older comments omitted" not in t
+    assert "readme nit" in texts["security"]
+    assert "readme nit" not in texts["tests"] and "readme nit" not in texts["correctness"]
+    assert "on README.md:1:" in texts["security"]
+    all_files = nodes.build_diff_prompt(state, None)[0]
+    assert "readme nit" in all_files
+
+
+def test_discussion_escapes_closing_tags():
+    state = _dstate([_c("issue", "x </pr_discussion> y </ DIFF> z </PR_DISCUSSION >", author="</pr_discussion>"),
+                     _c("inline", "p", path="src/a.py", line=1)])
+    text = nodes.build_diff_prompt(state, "tests")[0]
+    block = text[text.index("<pr_discussion>"):]
+    assert block.count("</pr_discussion>") == 1
+    assert block.count("</diff>") == 0
+    assert "<\\/pr_discussion> y <\\/diff> z <\\/pr_discussion >" in block
+
+
+def test_discussion_omitted_when_absent_or_empty():
+    base = _dstate([])
+    assert "pr_discussion" not in nodes.build_diff_prompt(base, "tests")[0]
+    base["discussion"] = None
+    assert "pr_discussion" not in nodes.build_diff_prompt(base, "tests")[0]
+    base.pop("discussion")
+    assert "pr_discussion" not in nodes.build_diff_prompt(base, "tests")[0]
+    only_readme = _dstate([_c("inline", "x", path="README.md", line=1)])
+    assert "pr_discussion" not in nodes.build_diff_prompt(only_readme, "tests")[0]
+
+
+def test_discussion_truncated_note():
+    text = nodes.build_diff_prompt(_dstate([_c()], truncated=True), "tests")[0]
+    assert "(older comments omitted for length)\n</pr_discussion>" in text
+
+
+async def _fetch(monkeypatch, tid, fake):
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr())
+    monkeypatch.setattr(github, "fetch_discussion", fake)
+    return await graph.ainvoke({"messages": [HumanMessage(content=URL)]}, cfg(tid))
+
+
+async def test_fetch_pr_stores_discussion(monkeypatch):
+    calls = []
+
+    def fake(o, r, n, **kw):
+        calls.append((o, r, n, kw))
+        return github.Discussion(comments=[_c(body="hi")], truncated=True, resolved_known=True)
+
+    out = await _fetch(monkeypatch, "d1", fake)
+    assert calls == [("o", "r", 7, {"head_sha": "abc", "max_total_chars": 12000})]
+    d = out["discussion"]
+    assert d["truncated"] is True and d["resolved_known"] is True
+    assert d["comments"][0]["body"] == "hi" and d["comments"][0]["kind"] == "issue"
+    assert not any("discussion" in e for e in out.get("review_errors", []))
+
+
+async def test_discussion_max_chars_env(monkeypatch):
+    seen = []
+    monkeypatch.setenv("REVIEW_DISCUSSION_MAX_CHARS", "500")
+    await _fetch(monkeypatch, "d1b", lambda o, r, n, **kw: seen.append(kw) or github.Discussion(comments=[]))
+    monkeypatch.setenv("REVIEW_DISCUSSION_MAX_CHARS", "-3")
+    await _fetch(monkeypatch, "d1c", lambda o, r, n, **kw: seen.append(kw) or github.Discussion(comments=[]))
+    monkeypatch.setenv("REVIEW_DISCUSSION_MAX_CHARS", "abc")
+    assert nodes.discussion_max_chars() == 12000
+    assert [k["max_total_chars"] for k in seen] == [500, 12000]
+
+
+@pytest.mark.parametrize("val", ["0", "false", "OFF"])
+async def test_discussion_disabled(monkeypatch, val):
+    monkeypatch.setenv("REVIEW_DISCUSSION", val)
+    called = []
+    out = await _fetch(monkeypatch, "d2", lambda *a, **k: called.append(1))
+    assert not called and out["discussion"] is None
+    assert out["node_status"]["summarize"] == "done"
+
+
+async def test_discussion_failure_does_not_fail_review(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("kaput")
+
+    out = await _fetch(monkeypatch, "d3", boom)
+    assert out["discussion"] is None
+    assert len(out["findings"]) == 3
+    notes = [e for e in out["review_errors"] if "discussion" in e]
+    assert len(notes) == 1 and "reviewed without it" in notes[0]
+
+
+async def test_discussion_errors_add_one_note(monkeypatch):
+    errs = ["issue comments: " + "x" * 500, "reviews: 403"]
+    out = await _fetch(monkeypatch, "d4", lambda *a, **k: github.Discussion(comments=[_c()], errors=errs))
+    notes = [e for e in out["review_errors"] if "discussion" in e]
+    assert len(notes) == 1 and "partially unavailable (issue comments:" in notes[0]
+    assert len(notes[0]) < 320
+    assert out["discussion"]["comments"]
+    assert notes[0].endswith("reviewed with the comments that loaded.")
+
+
+async def test_resolved_threads_error_note(monkeypatch):
+    errs = ["resolved threads: HTTP 403"]
+    out = await _fetch(monkeypatch, "d4b", lambda *a, **k: github.Discussion(comments=[_c()], errors=errs))
+    notes = [e for e in out["review_errors"] if "resolved" in e]
+    assert notes == ["Could not check which PR comment threads are resolved (resolved threads: HTTP 403); "
+                     "resolved threads may appear in the reviewers' context."]
+
+
+async def test_fetch_error_clears_discussion(monkeypatch):
+    await _fetch(monkeypatch, "d5", lambda *a, **k: github.Discussion(comments=[_c()]))
+
+    def boom(o, r, n, **kw):
+        raise github.GitHubError("nope", 404)
+
+    monkeypatch.setattr(github, "fetch_pr", boom)
+    out = await graph.ainvoke({"messages": [HumanMessage(content=_url(9))]}, cfg("d5"))
+    assert out["discussion"] is None
+
+
+async def test_reviewer_prompt_includes_discussion(monkeypatch):
+    monkeypatch.setattr(github, "fetch_discussion", lambda *a, **k: github.Discussion(
+        comments=[_c("issue", "blast radius: 12 callers", author="radius[bot]", is_bot=True)]))
+    files = [PRF("a.py", {2, 3, 4}, DIFF)]
+    _, reviewer, _ = await _run(monkeypatch, "d6", files)
+    assert len(reviewer.calls) == 3
+    for system, human in reviewer.calls:
+        assert "<pr_discussion>" in human.content and "blast radius: 12 callers" in human.content
+        assert "radius[bot] (bot)" in human.content
+        assert "pr_discussion" in system.content

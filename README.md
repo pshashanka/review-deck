@@ -57,6 +57,8 @@ Edit `.env`:
 | `OPENAI_BASE_URL` | Optional. For an OpenAI-compatible endpoint use `openai:<its model id>` plus this URL. |
 | `GITHUB_TOKEN` | Fine-grained token with Pull requests read/write and Contents read. Needed for private repos and for Apply fix. Public PRs can be reviewed without it, but rate-limited. Can be put in `.env` or exported in the shell that starts `npm run dev`. |
 | `GITHUB_API_URL` | Optional GitHub API base (GitHub Enterprise). Default `https://api.github.com`. Note the PR URL parser only accepts `github.com` links. |
+| `REVIEW_DISCUSSION` | Optional. Set `0`, `false` or `off` to stop fetching existing PR comments for the reviewers. Default on. `GITHUB_TOKEN` is needed to exclude resolved review threads. |
+| `REVIEW_DISCUSSION_MAX_CHARS` | Optional character budget for the PR discussion shown to reviewers. Default `12000`; invalid or non-positive values fall back to it. |
 | `*_MODEL`, `*_BUDGET_SECONDS` | Per-step routing and time budgets; see Choosing models. |
 | `CPK_INTELLIGENCE_API_KEY` etc. | Optional (`INTELLIGENCE_API_URL`, `INTELLIGENCE_GATEWAY_WS_URL`, `COPILOTKIT_LICENSE_TOKEN`). Enables the CopilotKit Intelligence threads drawer. Without it, an in-memory runner is used. |
 
@@ -122,7 +124,7 @@ UI at http://localhost:3000, agent at http://localhost:8123. Startup prints warn
 
 ## What each reviewer checks
 
-Three reviewers run in parallel, each with its own rubric (`RUBRICS` in `agent/src/review/nodes.py`) and explicit ownership boundaries. There is no lint reviewer: formatting, naming, import order and dead-code nits are left to linters in CI such as ruff or eslint.
+Three reviewers run in parallel, each with its own rubric (`RUBRICS` in `agent/src/review/nodes.py`) and explicit ownership boundaries. Reviewers also see the PR's existing comments (issue comments, reviews and inline threads from people and bots such as bugbot or blast-radius reports) as untrusted leads to verify against the diff; inline comments are only shown to reviewers that receive that file. Disable with `REVIEW_DISCUSSION=0`. There is no lint reviewer: formatting, naming, import order and dead-code nits are left to linters in CI such as ruff or eslint.
 
 | Reviewer | Checks | Does not report (owner) |
 | --- | --- | --- |

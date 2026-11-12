@@ -56,6 +56,9 @@ class ReviewState(CopilotKitState):
     # {input_tokens, output_tokens, cached_tokens, cost_usd|None, skipped_files, files_total}.
     review_stats: dict[str, Any] | None
     error: str | None
+    # Existing PR comments set by fetch_pr (None when disabled/failed):
+    # {comments: [dataclasses.asdict(github.Comment)], truncated, resolved_known}.
+    discussion: dict[str, Any] | None
     review_errors: Annotated[list[str], merge_errors]
     # Set by handle_action for render_findings (compact per-action surface); cleared there.
     action: dict[str, Any] | None
