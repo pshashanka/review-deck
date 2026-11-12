@@ -7,6 +7,7 @@ import pytest
 
 from src.github import (
     GitHubError,
+    _hunk_end_line,
     fetch_discussion,
     annotate_patch,
     build_comment_body,
@@ -555,3 +556,44 @@ def test_discussion_pagination_via_link_header():
 
     d = fetch_discussion("o", "r", 7, client=make_client(handler))
     assert [c.body for c in d.comments] == ["one", "two"]
+
+
+
+def test_hunk_end_line():
+    assert _hunk_end_line("@@ -10,3 +20,4 @@ def f():\n a\n-b\n+c\n+d") == 22
+    assert _hunk_end_line("@@ -10,3 +20,3 @@\n a\n+c\n-b") is None
+    assert _hunk_end_line("@@ -1,2 +1,2 @@\n a\n b\n@@ -50,2 +60,3 @@\n x\n+y\n\\ No newline at end of file") == 61
+    assert _hunk_end_line("@@ -5 +7 @@\n+z") == 7
+    for bad in ("", "no header\n+x", "@@ -1 +1 @@", None, "@@ -1 +1 @@\n?weird"):
+        assert _hunk_end_line(bad) is None
+
+
+HUNK = "@@ -410,3 +415,3 @@\n a\n b\n+c"  # ends at new line 417 (the comment's own commit)
+
+
+def _inline_line(head_sha=None, **over):
+    fields = {"line": 418, "original_line": 417, "commit_id": "HEAD", "diff_hunk": HUNK, **over}
+    h = _disc_handler(inline=[_issue("x", id=1, path="a.py", **fields)])
+    (c,) = fetch_discussion("o", "r", 7, client=make_client(h), head_sha=head_sha).comments
+    return c
+
+
+def test_inline_line_trusts_consistent_api():
+    c = _inline_line()
+    assert (c.line, c.outdated) == (418, False)
+
+
+def test_inline_line_corrupted_on_head_uses_computed():
+    c = _inline_line(head_sha="HEAD", line=1, original_line=1)
+    assert (c.line, c.outdated) == (417, False)
+
+
+def test_inline_line_corrupted_other_commit_unknown():
+    for head in ("OTHER", None):
+        c = _inline_line(head_sha=head, line=1, original_line=1)
+        assert (c.line, c.outdated) == (None, False)
+
+
+def test_inline_line_null_is_outdated():
+    c = _inline_line(line=None)
+    assert (c.line, c.outdated) == (None, True)

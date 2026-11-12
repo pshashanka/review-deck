@@ -6,6 +6,7 @@ optional for reads of public repos and required for posting;
 ``GITHUB_API_URL`` overrides the API base (GitHub Enterprise).
 """
 
+import logging
 import os
 import re
 from collections.abc import Callable
@@ -13,6 +14,8 @@ from dataclasses import dataclass, field
 from urllib.parse import urlsplit
 
 import httpx
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_API_URL = "https://api.github.com"
 TIMEOUT_SECONDS = 20.0
@@ -468,6 +471,35 @@ def _fetch_resolved_ids(client: httpx.Client, owner: str, repo: str, number: int
     return resolved
 
 
+def _hunk_end_line(diff_hunk: object) -> int | None:
+    """New-file line of the last line of ``diff_hunk`` (None if unknown or a removed line)."""
+    if not isinstance(diff_hunk, str):
+        return None
+    lines = diff_hunk.split("\n")
+    start = None
+    for i, raw in enumerate(lines):
+        m = _HUNK_HEADER.match(raw)
+        if m:
+            start, new_line = i, int(m.group(1))
+    if start is None:
+        return None
+    body = lines[start + 1 :]
+    if body and body[-1] == "":
+        body.pop()
+    last: int | None = None
+    for raw in body:
+        if raw.startswith("\\"):
+            continue
+        if raw.startswith("-"):
+            last = None
+        elif raw.startswith("+") or raw.startswith(" ") or raw == "":
+            last = new_line
+            new_line += 1
+        else:
+            return None
+    return last
+
+
 def _is_bot(user: dict) -> bool:
     return user.get("type") == "Bot" or str(user.get("login", "")).endswith("[bot]")
 
@@ -478,6 +510,7 @@ def fetch_discussion(
     number: int,
     *,
     client: httpx.Client | None = None,
+    head_sha: str | None = None,
     max_total_chars: int = 20_000,
     max_comment_chars: int = 2_000,
 ) -> Discussion:
@@ -526,8 +559,20 @@ def fetch_discussion(
         if c is None:
             return None
         c.path = item.get("path")
-        c.line = item.get("line")
-        c.outdated = c.line is None
+        api_line = item.get("line")
+        if api_line is None:
+            c.line, c.outdated = None, True
+        else:
+            computed = _hunk_end_line(item.get("diff_hunk"))
+            if computed is None or computed == item.get("original_line"):
+                c.line = api_line
+            else:
+                # GitHub intermittently returns line=original_line=1; recompute from the hunk.
+                logger.debug(
+                    "inline comment %s: API line %s disagrees with diff_hunk line %s",
+                    item.get("id"), api_line, computed,
+                )
+                c.line = computed if head_sha and item.get("commit_id") == head_sha else None
         return c
 
     try:
