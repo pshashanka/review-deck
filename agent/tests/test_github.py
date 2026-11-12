@@ -572,7 +572,7 @@ HUNK = "@@ -410,3 +415,3 @@\n a\n b\n+c"  # ends at new line 417 (the comment's 
 
 
 def _inline_line(head_sha=None, **over):
-    fields = {"line": 418, "original_line": 417, "commit_id": "HEAD", "diff_hunk": HUNK, **over}
+    fields = {"line": 418, "original_line": 417, "commit_id": "HEAD", "original_commit_id": "HEAD", "diff_hunk": HUNK, **over}
     h = _disc_handler(inline=[_issue("x", id=1, path="a.py", **fields)])
     (c,) = fetch_discussion("o", "r", 7, client=make_client(h), head_sha=head_sha).comments
     return c
@@ -597,3 +597,9 @@ def test_inline_line_corrupted_other_commit_unknown():
 def test_inline_line_null_is_outdated():
     c = _inline_line(line=None)
     assert (c.line, c.outdated) == (None, True)
+
+
+def test_inline_line_corrupted_commit_id_head_but_original_differs():
+    # diff_hunk is relative to original_commit_id; must not be used when it isn't head.
+    c = _inline_line(head_sha="HEAD", line=1, original_line=1, commit_id="HEAD", original_commit_id="OLD")
+    assert (c.line, c.outdated) == (None, False)

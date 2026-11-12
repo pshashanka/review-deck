@@ -568,11 +568,13 @@ def fetch_discussion(
                 c.line = api_line
             else:
                 # GitHub intermittently returns line=original_line=1; recompute from the hunk.
+                # diff_hunk and original_line are relative to original_commit_id (not
+                # commit_id), so the hunk line is only the current line when that is head.
                 logger.debug(
                     "inline comment %s: API line %s disagrees with diff_hunk line %s",
                     item.get("id"), api_line, computed,
                 )
-                c.line = computed if head_sha and item.get("commit_id") == head_sha else None
+                c.line = computed if head_sha and item.get("original_commit_id") == head_sha else None
         return c
 
     try:
