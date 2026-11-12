@@ -17,6 +17,9 @@ class Finding(BaseModel):
     status: Literal["open", "approved", "rejected", "applied", "dismissed"] = "open"
     comment_url: str = ""
     error: str = ""
+    prior_author: str = ""
+    prior_url: str = ""
+    prior_is_bot: bool = False
 
 
 class FindingList(BaseModel):

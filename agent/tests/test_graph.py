@@ -1624,3 +1624,96 @@ async def test_reviewer_prompt_includes_discussion(monkeypatch):
         assert "<pr_discussion>" in human.content and "blast radius: 12 callers" in human.content
         assert "radius[bot] (bot)" in human.content
         assert "pr_discussion" in system.content
+
+
+# ---------------------------------------------------------------- already raised
+
+
+def _ic(path="a.py", line=3, author="cursor[bot]", is_bot=True, created_at="2024-01-02", url="u1",
+        kind="inline", outdated=False):
+    return {"kind": kind, "author": author, "is_bot": is_bot, "body": "b", "created_at": created_at,
+            "url": url, "path": path, "line": line, "outdated": outdated}
+
+
+def _fd(file="a.py", line=3):
+    return {"id": "f1", "file": file, "line": line, "severity": "medium", "category": "correctness",
+            "title": "T", "explanation": "E", "status": "open"}
+
+
+def _mark(comments, **kw):
+    return nodes.mark_already_raised([_fd(**kw)], {"comments": comments})[0]
+
+
+def test_mark_within_snap_distance():
+    assert _mark([_ic(line=5)])["prior_url"] == "u1"
+    assert _mark([_ic(line=6)])["prior_url"] == ""
+
+
+def test_mark_nearest_wins_and_tie_earliest():
+    r = _mark([_ic(line=5, url="far"), _ic(line=4, url="near")])
+    assert r["prior_url"] == "near"
+    r = _mark([_ic(line=2, url="late", created_at="2024-02-01"), _ic(line=4, url="early", created_at="2024-01-01")])
+    assert r["prior_url"] == "early"
+
+
+def test_mark_fields_and_clearing():
+    r = _mark([_ic()])
+    assert (r["prior_author"], r["prior_is_bot"]) == ("cursor[bot]", True)
+    stale = {**_fd(), "prior_author": "x", "prior_url": "y", "prior_is_bot": True}
+    out = nodes.mark_already_raised([stale], {"comments": []})[0]
+    assert (out["prior_author"], out["prior_url"], out["prior_is_bot"]) == ("", "", False)
+
+
+@pytest.mark.parametrize("comment", [
+    _ic(path="b.py"), _ic(outdated=True), _ic(line=None), _ic(kind="issue"), _ic(kind="review"),
+])
+def test_mark_no_match(comment):
+    assert _mark([comment])["prior_url"] == ""
+
+
+def test_mark_none_discussion_and_no_mutation():
+    f = _fd()
+    assert nodes.mark_already_raised([f], None)[0]["prior_url"] == ""
+    out = nodes.mark_already_raised([f], {"comments": [_ic()]})
+    assert "prior_url" not in f and out[0] is not f
+
+
+def test_prior_label_bot_suffix():
+    assert nodes._prior_label("cursor[bot]", True) == "Already raised by cursor[bot]"
+    assert nodes._prior_label("renovate", True) == "Already raised by renovate (bot)"
+    assert nodes._prior_label("alice", False) == "Already raised by alice"
+
+
+async def _marked_review(monkeypatch, tid):
+    import dataclasses
+    c = github.Comment(kind="inline", author="cursor[bot]", is_bot=True, body="b", created_at="t",
+                       url="https://github.com/o/r/pull/7#discussion_r9", path="a.py", line=4)
+    monkeypatch.setattr(github, "fetch_discussion", lambda *a, **k: github.Discussion(comments=[c]))
+    out, *_ = await _run(
+        monkeypatch, tid, [PRF("a.py", {3, 4, 5}, "   3+x = 0\n   4+y\n   5+z")],
+        outputs={"correctness": ReviewerOutput(findings=[RF(line=3, suggestion="x = 1")]),
+                 "security": ReviewerOutput(), "tests": ReviewerOutput()},
+    )
+    return out
+
+
+async def test_graph_marks_finding_and_surface_data(monkeypatch):
+    out = await _marked_review(monkeypatch, "ar1")
+    f = out["findings"][0]
+    assert (f["prior_author"], f["prior_is_bot"]) == ("cursor[bot]", True)
+    assert f["prior_url"].endswith("discussion_r9")
+    d = _surface_data(out)["findings"][0]
+    assert d["already_raised"] is True and d["prior_label"] == "Already raised by cursor[bot]"
+    assert d["prior_url"] == f["prior_url"]
+
+
+async def test_apply_on_marked_finding_still_posts(monkeypatch):
+    out = await _marked_review(monkeypatch, "ar2")
+    fid = out["findings"][0]["id"]
+    calls = []
+    monkeypatch.setattr(github, "post_suggestion", lambda *a, **kw: calls.append(kw) or "https://x/y")
+    out = await _do("ar2", "apply_fix", fid)
+    assert len(calls) == 1
+    done = _finding(out, fid)
+    assert done["status"] == "applied" and done["prior_author"] == "cursor[bot]" and done["prior_url"].endswith("r9")
+    assert _surface_data(out)["findings"][0]["already_raised"] is True

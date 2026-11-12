@@ -432,6 +432,15 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
       const error = typeof props.error === "string" ? props.error : "";
       const suggestion =
         typeof props.suggestion === "string" ? props.suggestion : "";
+      const alreadyRaised = props.alreadyRaised === true;
+      const priorUrl =
+        typeof props.priorUrl === "string" && /^https?:\/\//i.test(props.priorUrl)
+          ? props.priorUrl
+          : "";
+      const priorLabel =
+        typeof props.priorLabel === "string" && props.priorLabel
+          ? props.priorLabel
+          : "Already raised";
 
       return (
         <FindingBody
@@ -440,6 +449,25 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
           statusStyle={st}
           suggestion={suggestion}
         >
+          {alreadyRaised && (
+            <div>
+              {priorUrl ? (
+                <a
+                  href={priorUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  style={{
+                    ...pillStyle("#fef3c7", "#92400e"),
+                    textDecoration: "none",
+                  }}
+                >
+                  {priorLabel}
+                </a>
+              ) : (
+                <span style={pillStyle("#fef3c7", "#92400e")}>{priorLabel}</span>
+              )}
+            </div>
+          )}
           {error && (
             <div role="alert" style={{ fontSize: "0.8rem", color: "#991b1b" }}>
               {error}
@@ -457,7 +485,13 @@ const demonstrationCatalogRenderers: CatalogRenderers<DemonstrationCatalogDefini
           )}
           <div style={{ display: "flex", gap: "8px", marginTop: "4px" }}>
             <ReviewButton
-              label={suggestion ? "Apply fix" : "Post comment"}
+              label={
+                alreadyRaised
+                  ? "Post anyway"
+                  : suggestion
+                    ? "Apply fix"
+                    : "Post comment"
+              }
               action={props.applyAction}
               disabled={!actionable}
               primary

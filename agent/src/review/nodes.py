@@ -612,6 +612,38 @@ def dedupe_findings(findings: list[dict]) -> list[dict]:
     return [f for f in findings if id(f) in kept]
 
 
+def mark_already_raised(findings: list[dict], discussion: dict | None) -> list[dict]:
+    """Flag findings that an existing inline PR comment already covers (same file, within SNAP_DISTANCE lines).
+
+    Returns new dicts with prior_author/prior_url/prior_is_bot set (or cleared when nothing matches).
+    Outdated comments and comments with an unknown line never match.
+    """
+    inline = [
+        c for c in ((discussion or {}).get("comments") or [])
+        if c.get("kind") == "inline" and c.get("line") is not None and not c.get("outdated")
+    ]
+    out = []
+    for f in findings:
+        best = None
+        for c in inline:
+            if c.get("path") != f["file"]:
+                continue
+            dist = abs(c["line"] - f["line"])
+            if dist > SNAP_DISTANCE:
+                continue
+            key = (dist, c.get("created_at") or "")
+            if best is None or key < best[0]:
+                best = (key, c)
+        c = best[1] if best else None
+        out.append({
+            **f,
+            "prior_author": (c.get("author") or "") if c else "",
+            "prior_url": (c.get("url") or "") if c else "",
+            "prior_is_bot": bool(c.get("is_bot")) if c else False,
+        })
+    return out
+
+
 def verdict_for(findings: list[dict]) -> str:
     if any(f["severity"] == "high" for f in findings):
         return "Request changes"
@@ -649,7 +681,8 @@ async def approval_gate(state: ReviewState, config: RunnableConfig):
     """
     await _running(state, config, "approval_gate")
     raw = state.get("findings", [])
-    findings = dedupe_findings(raw)
+    findings = mark_already_raised(dedupe_findings(raw), state.get("discussion"))
+    rewrite_all = findings != raw
     update: dict[str, Any] = {"node_status": {"approval_gate": "done"}}
     if len(findings) != len(raw):
         logger.info("dedupe: dropped %d overlapping finding(s)", len(raw) - len(findings))
@@ -665,10 +698,10 @@ async def approval_gate(state: ReviewState, config: RunnableConfig):
         decisions = parse_decisions(answer, {f["id"] for f in high})
         status = {fid: ("rejected" if d == "reject" else "approved") for fid, d in decisions.items()}
         findings = [{**f, "status": status[f["id"]]} if f["id"] in status else f for f in findings]
-        update["findings"] = [RESET, *findings] if len(findings) != len(raw) else [
+        update["findings"] = [RESET, *findings] if rewrite_all else [
             f for f in findings if f["id"] in status
         ]
-    elif len(findings) != len(raw):
+    elif rewrite_all:
         update["findings"] = [RESET, *findings]
     return update
 
@@ -898,7 +931,15 @@ async def handle_action(state: ReviewState, config: RunnableConfig):
 # ---------------------------------------------------------------- tool
 
 
+def _prior_label(author: str, is_bot: bool) -> str:
+    suffix = " (bot)" if is_bot and not author.endswith("[bot]") else ""
+    return f"Already raised by {author}{suffix}"
+
+
 def _finding_data(f: dict) -> dict:
+    prior_url = f.get("prior_url") or ""
+    prior_author = f.get("prior_author") or ""
+    already = bool(prior_url or prior_author)
     return {
         "id": f["id"],
         "severity": f["severity"],
@@ -911,6 +952,9 @@ def _finding_data(f: dict) -> dict:
         "status": f.get("status", "open"),
         "comment_url": f.get("comment_url") or "",
         "error": f.get("error") or "",
+        "already_raised": already,
+        "prior_label": _prior_label(prior_author or "a reviewer", bool(f.get("prior_is_bot"))) if already else "",
+        "prior_url": prior_url,
     }
 
 

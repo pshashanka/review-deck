@@ -148,6 +148,15 @@ export const demonstrationCatalogDefinitions = {
       error: DynString.optional().describe(
         "Last apply error, human-readable (empty when none).",
       ),
+      alreadyRaised: DynBool.optional().describe(
+        "True when an existing PR comment already covers this finding; shows a badge and relabels the post button 'Post anyway'.",
+      ),
+      priorLabel: DynString.optional().describe(
+        "Badge text, e.g. 'Already raised by cursor[bot]'.",
+      ),
+      priorUrl: DynString.optional().describe(
+        "URL of the existing comment the badge links to.",
+      ),
       applyAction: ActionProp,
       dismissAction: ActionProp,
     }),

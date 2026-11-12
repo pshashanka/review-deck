@@ -38,6 +38,9 @@
     "status": { "path": "status" },
     "commentUrl": { "path": "comment_url" },
     "error": { "path": "error" },
+    "alreadyRaised": { "path": "already_raised" },
+    "priorLabel": { "path": "prior_label" },
+    "priorUrl": { "path": "prior_url" },
     "applyAction": {
       "event": { "name": "apply_fix", "context": { "findingId": { "path": "id" } } }
     },
