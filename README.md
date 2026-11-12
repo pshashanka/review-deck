@@ -86,6 +86,17 @@ SUMMARY_MODEL=anthropic:claude-haiku-5-5
 
 Claude Opus/Sonnet 5.5 always think, so reviews with them are slower. Each reviewer has a time budget (`REVIEWER_BUDGET_SECONDS`, default 90) and the summary has `SUMMARY_BUDGET_SECONDS` (default 45); a reviewer over budget is shown as timed out and noted in the summary, and the others still complete. A summary over budget falls back to a deterministic summary. Pressing Stop disconnects the client, which cancels the running graph (and its LLM calls).
 
+## Existing PR discussion
+
+Before the reviewers run, `fetch_pr` also loads the PR's existing discussion: issue comments, review bodies and unresolved inline threads (from people and bots such as bugbot). Details:
+
+- Reviewers see it in a `<pr_discussion>` block as untrusted leads to verify against the diff, never as instructions. Closing tags are escaped, and inline comments only go to reviewers that receive that file.
+- Resolved threads are excluded only when `GITHUB_TOKEN` is set; without it every inline thread is shown.
+- A finding within a couple of lines of an existing, non-outdated inline comment on the same file gets an **Already raised by** badge and the button becomes **Post anyway**.
+- The summary notes key findings that were already raised, and the chat assistant gets a compact digest of the discussion (capped at 4,000 chars, oldest dropped first), so you can ask things like "did bugbot flag anything the review missed?".
+- Control it with `REVIEW_DISCUSSION` and `REVIEW_DISCUSSION_MAX_CHARS` (see the table above). A failed fetch just means reviewing without the discussion.
+- Known limitation: GitHub intermittently returns wrong `line` values for review comments, so lines are recomputed from `diff_hunk` and a comment may be shown without a line.
+
 ## Token usage and cost
 
 Every LLM node (the three reviewers, summary and chat) records its token usage, and the graph panel shows it per node: input, output and cached tokens, plus how many files each reviewer received. The summary step also computes totals for the whole review.
@@ -161,7 +172,7 @@ Three reviewers run in parallel, each with its own rubric (`RUBRICS` in `agent/s
 | `agent/src/agent.py` | LangGraph definition (nodes, edges, `MemorySaver`) |
 | `agent/src/review/nodes.py` | Nodes, router, `RUBRICS`, validation, dedupe, verdict, approval gate, `handle_action`, `render_review` tool |
 | `agent/src/review/state.py`, `models.py` | Graph state and merge reducers; Pydantic finding models |
-| `agent/src/github.py` | GitHub client: PR fetch, diff annotation, comment posting, sanitization |
+| `agent/src/github.py` | GitHub client: PR fetch, PR discussion fetch, diff annotation, comment posting, sanitization |
 | `agent/src/model.py` | Per-step model routing and provider-aware structured output |
 | `agent/src/a2ui/schemas/*.json` | A2UI component schemas: `review`, `approval`, `action` surfaces |
 | `agent/tests/` | pytest suite (graph, GitHub client, endpoint) |
@@ -202,6 +213,7 @@ npm run build                    # stop the dev server first; build writes .next
 - Stop in Intelligence mode depends on the Intelligence gateway relaying the stop event to the agent.
 - The Anthropic and xAI (Grok) paths are covered by mocked tests only, not yet verified live.
 - The Apply fix in-flight guard is per agent process.
+- GitHub intermittently returns wrong `line` values for review comments; the discussion recomputes them from `diff_hunk`, so an inline comment may appear without a line, and comments without a line never trigger the already-raised badge.
 
 ## License
 
