@@ -1800,3 +1800,43 @@ async def test_chat_digest_cap_drops_oldest_and_escapes(monkeypatch):
     assert "by u0:" not in block and "by last" in block
     assert block.count("</pr_discussion") == 0 and "<\\/pr_discussion>" in block
     assert system.count("</pr_discussion>") == 1
+
+
+class ReplyModel:
+    def __init__(self, msg):
+        self.msg = msg
+
+    async def ainvoke(self, messages, config=None):
+        return self.msg
+
+
+async def _chat_out(monkeypatch, tid, msg):
+    monkeypatch.setattr(nodes, "create_chat_model", lambda *a, **k: ReplyModel(msg))
+    out = await graph.ainvoke({"messages": [HumanMessage(content="hello")]}, cfg(tid))
+    return out["messages"][-1]
+
+
+async def test_chat_block_list_reply_is_plain_text(monkeypatch):
+    blocks = [{"type": "thinking", "thinking": "secret"}, {"type": "text", "text": "Plain "},
+              {"type": "text", "text": "reply"}]
+    last = await _chat_out(monkeypatch, "t-blocks", AIMessage(content=blocks))
+    assert last.content == "Plain reply"
+    assert "secret" not in last.content
+
+
+async def test_chat_reply_id_preserved(monkeypatch):
+    last = await _chat_out(monkeypatch, "t-id", AIMessage(content="hi", id="run-123"))
+    assert last.id == "run-123"
+    assert last.content == "hi"
+
+
+async def test_chat_plain_string_unchanged(monkeypatch):
+    last = await _chat_out(monkeypatch, "t-str", AIMessage(content="  just text "))
+    assert last.content == "  just text "
+
+
+async def test_summary_block_list_normalized(monkeypatch):
+    blocks = [{"type": "reasoning", "summary": [], "text": "secret"}, {"type": "text", "text": "- Bullet one"}]
+    out, _, _ = await _run(monkeypatch, "v-blocks", [PRF("a.py", {3, 4, 5, 6})], summary=FakeSummary(reply=blocks))
+    assert "- Bullet one" in out["summary"]
+    assert "secret" not in out["summary"]

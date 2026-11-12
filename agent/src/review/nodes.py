@@ -50,6 +50,18 @@ def _text(msg: AnyMessage) -> str:
     return " ".join(p.get("text", "") if isinstance(p, dict) else str(p) for p in c)
 
 
+def _reply_text(msg: AnyMessage) -> str:
+    """Plain text of a model reply: only text blocks (no thinking/reasoning/tool blocks)."""
+    c = msg.content
+    if isinstance(c, str):
+        return c
+    return "".join(
+        p if isinstance(p, str) else (p.get("text") or "")
+        for p in c
+        if isinstance(p, str) or (isinstance(p, dict) and p.get("type") == "text")
+    ).strip()
+
+
 def find_pr_url(text: str) -> tuple[str, str, int] | None:
     for m in _PR_URL_RE.finditer(text):
         try:
@@ -184,8 +196,9 @@ async def chat(state: ReviewState, config: RunnableConfig):
         if not isinstance(m, ToolMessage) and not (isinstance(m, AIMessage) and m.tool_calls)
     ]
     reply = await model.ainvoke([SystemMessage(content=system), *history], config)
+    ai = AIMessage(content=_reply_text(reply), id=reply.id) if reply.id else AIMessage(content=_reply_text(reply))
     return {
-        "messages": [AIMessage(content=reply.content)],
+        "messages": [ai],
         "node_status": {RESET_KEY: True, "chat": "done"},
         "node_models": {RESET_KEY: True, "chat": spec},
         "node_usage": {RESET_KEY: True, "chat": usage_record(spec, reply)},
@@ -840,7 +853,7 @@ async def summarize(state: ReviewState, config: RunnableConfig):
                 ]),
                 summary_budget_s(),
             )
-            body = _text(reply).strip()
+            body = _reply_text(reply).strip()
             summary_usage = usage_record(spec, reply)
             logger.info("summary (%s) finished in %.1fs, tokens in=%d out=%d, cost=%s", spec,
                         time.monotonic() - started, summary_usage["input_tokens"],
