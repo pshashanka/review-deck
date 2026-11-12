@@ -65,3 +65,13 @@
     grid-column: auto;
   }
 }
+
+/* No Intelligence / threads disabled: skip the reserved drawer column entirely. */
+.layoutNoThreads {
+  grid-template-columns: minmax(0, 1fr);
+  --cpk-drawer-reserved-width: 0px;
+}
+
+.mainPanelFullWidth {
+  grid-column: 1;
+}

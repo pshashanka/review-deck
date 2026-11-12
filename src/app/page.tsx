@@ -14,6 +14,9 @@ import {
 
 import styles from "./page.module.css";
 
+const threadsDrawerEnabled =
+  process.env.NEXT_PUBLIC_COPILOTKIT_THREADS_ENABLED === "true";
+
 function HomeContent() {
   useGenerativeUIExamples();
   useExampleSuggestions();
@@ -55,14 +58,27 @@ function HomeContent() {
     */
     <CopilotChatConfigurationProvider agentId="default" threadId={threadId}>
       <ApprovalInterrupt />
-      <div className={styles.layout}>
-        {/* SDK threads drawer (replaces the hand-rolled fork). License-gated: the locked view's Upgrade CTA opens the Intelligence docs by default. */}
-        <CopilotThreadsDrawer
-          agentId="default"
-          onThreadSelect={(id) => setThread(id)}
-          onNewThread={() => setThread(crypto.randomUUID())}
-        />
-        <div className={styles.mainPanel}>
+      <div
+        className={
+          threadsDrawerEnabled
+            ? styles.layout
+            : `${styles.layout} ${styles.layoutNoThreads}`
+        }
+      >
+        {threadsDrawerEnabled ? (
+          <CopilotThreadsDrawer
+            agentId="default"
+            onThreadSelect={(id) => setThread(id)}
+            onNewThread={() => setThread(crypto.randomUUID())}
+          />
+        ) : null}
+        <div
+          className={
+            threadsDrawerEnabled
+              ? styles.mainPanel
+              : `${styles.mainPanel} ${styles.mainPanelFullWidth}`
+          }
+        >
           <ExampleLayout
             chatContent={
               <CopilotChat

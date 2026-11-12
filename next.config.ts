@@ -14,6 +14,7 @@ const nextConfig: NextConfig = {
     // NEXT_PUBLIC_* resolves at build time while the Runtime reads the project key
     // per request. Provide CPK_INTELLIGENCE_API_KEY during the host build so the
     // browser gate matches the managed Runtime configuration.
+    // Threads drawer needs CopilotKit Intelligence + a settled license; default off locally.
     NEXT_PUBLIC_COPILOTKIT_THREADS_ENABLED: process.env.CPK_INTELLIGENCE_API_KEY
       ? "true"
       : "false",

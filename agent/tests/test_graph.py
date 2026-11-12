@@ -123,6 +123,16 @@ async def test_chat(monkeypatch):
     assert "fetch_pr" not in out.get("node_status", {})
 
 
+async def test_chat_normalizes_block_list_content(monkeypatch):
+    class BlockReplyModel:
+        async def ainvoke(self, *args, **kwargs):
+            return AIMessage(content=[{"type": "text", "text": "Plain reply body"}])
+
+    monkeypatch.setattr(nodes, "create_chat_model", lambda *a, **k: BlockReplyModel())
+    out = await nodes.chat({"messages": [HumanMessage(content="hi")]}, {})
+    assert out["messages"][-1].content == "Plain reply body"
+
+
 async def test_github_error(monkeypatch):
     def boom(o, r, n, **kw):
         raise github.GitHubError("PR not found", 404)

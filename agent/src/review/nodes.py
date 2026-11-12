@@ -185,7 +185,9 @@ async def chat(state: ReviewState, config: RunnableConfig):
     ]
     reply = await model.ainvoke([SystemMessage(content=system), *history], config)
     return {
-        "messages": [AIMessage(content=reply.content)],
+        # Anthropic (and others) may return block lists; AG-UI needs a plain string or the
+        # streamed reply is overwritten with an empty assistant message when the run ends.
+        "messages": [AIMessage(content=_text(reply))],
         "node_status": {RESET_KEY: True, "chat": "done"},
         "node_models": {RESET_KEY: True, "chat": spec},
         "node_usage": {RESET_KEY: True, "chat": usage_record(spec, reply)},
