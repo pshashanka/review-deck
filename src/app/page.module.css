@@ -65,3 +65,15 @@
     grid-column: auto;
   }
 }
+
+/*
+  No threads drawer (Intelligence disabled or unreachable): single full-width
+  column. Doubled class selectors raise specificity so these win over both the
+  base rules and the mobile block regardless of order.
+*/
+.layout.layoutNoThreads {
+  grid-template-columns: minmax(0, 1fr);
+}
+.layout .mainPanel.mainPanelFullWidth {
+  grid-column: 1;
+}

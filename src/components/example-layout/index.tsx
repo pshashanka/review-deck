@@ -11,6 +11,8 @@ interface ExampleLayoutProps {
   defaultMode?: "chat" | "app";
   /** Rendered at the right end of the chat header row. */
   headerActions?: ReactNode;
+  /** Whether the threads drawer (and its floating launcher) is rendered. */
+  hasThreadsDrawer?: boolean;
 }
 
 export function ExampleLayout({
@@ -18,6 +20,7 @@ export function ExampleLayout({
   appContent,
   defaultMode = "chat",
   headerActions,
+  hasThreadsDrawer = true,
 }: ExampleLayoutProps) {
   const [mode, setMode] = useState<"chat" | "app">(defaultMode);
 
@@ -50,7 +53,8 @@ export function ExampleLayout({
             : "flex-1 max-lg:px-4"
         }`}
       >
-        {/* Clear the threads drawer's floating launcher/collapsed cluster, which
+        {/* When there is no drawer (hasThreadsDrawer=false) there is no launcher
+            to clear, so plain padding is used. Otherwise: clear the threads drawer's floating launcher/collapsed cluster, which
             is fixed at the top-left corner. Below 1024px (mobile off-canvas) that
             is always present → max-lg:pl-24. On desktop it only appears when the
             drawer is COLLAPSED — detected via --cpk-drawer-reserved-width, which
@@ -59,7 +63,13 @@ export function ExampleLayout({
             so the logo never sits under the cluster. max-lg:pt-2.5 + pb-0
             vertically center the logo with that launcher and the top-right
             Chat/App toggle (both pinned at top-2). */}
-        <div className="shrink-0 pt-[23px] pl-[max(1.5rem,calc(7rem_-_var(--cpk-drawer-reserved-width,320px)))] pb-2 max-lg:pl-24 max-lg:pb-4 flex gap-1.5 items-center align-center">
+        <div
+          className={`shrink-0 pt-[23px] pb-2 max-lg:pb-4 flex gap-1.5 items-center align-center ${
+            hasThreadsDrawer
+              ? "pl-[max(1.5rem,calc(7rem_-_var(--cpk-drawer-reserved-width,320px)))] max-lg:pl-24"
+              : "pl-6 max-lg:pl-4"
+          }`}
+        >
           <span className="font-extrabold text-2xl">review-deck</span>
           <span className="text-xs text-[var(--muted-foreground)] self-end pb-1">
             built with CopilotKit

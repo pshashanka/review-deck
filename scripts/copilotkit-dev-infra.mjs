@@ -130,6 +130,21 @@ if (intelligenceFailures.length > 0) {
   );
 }
 
+// Self-hosted Intelligence reachability: when a key and a local URL are set but
+// the service is down (e.g. Docker stopped), threads and chat runs fail. Any HTTP
+// response counts as reachable; only a network error/timeout warns.
+const intelligenceKey = resolveVendorKeyValue(process.env, envFileContent, 'CPK_INTELLIGENCE_API_KEY');
+const intelligenceUrl = resolveVendorKeyValue(process.env, envFileContent, 'INTELLIGENCE_API_URL');
+if (intelligenceKey !== '' && intelligenceUrl !== '') {
+  try {
+    await fetch(intelligenceUrl, { signal: AbortSignal.timeout(2000) });
+  } catch {
+    console.warn(
+      `⚠ CopilotKit Intelligence is not reachable at ${intelligenceUrl} — threads and chat will fail until it is running (local stack: start Docker).`,
+    );
+  }
+}
+
 // GITHUB_TOKEN is optional: without it, public PRs still review (rate-limited)
 // but private repos fail and "Apply fix" cannot post suggestion comments.
 if (resolveVendorKeyValue(process.env, envFileContent, 'GITHUB_TOKEN') === '') {

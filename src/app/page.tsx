@@ -4,7 +4,11 @@ import { Suspense, useCallback, useEffect } from "react";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { ExampleLayout } from "@/components/example-layout";
 import { ApprovalInterrupt, ReviewFlow } from "@/components/review";
-import { useGenerativeUIExamples, useExampleSuggestions } from "@/hooks";
+import {
+  useGenerativeUIExamples,
+  useExampleSuggestions,
+  useIntelligenceStatus,
+} from "@/hooks";
 
 import {
   CopilotChat,
@@ -17,6 +21,9 @@ import styles from "./page.module.css";
 function HomeContent() {
   useGenerativeUIExamples();
   useExampleSuggestions();
+  const { status: intelligence, url: intelligenceUrl } = useIntelligenceStatus();
+  // Keep the drawer while "checking" so the normal case has no layout shift.
+  const hasDrawer = intelligence === "checking" || intelligence === "ok";
 
   // The active thread lives in the URL (?thread=<id>) so a reload reconnects to the
   // same thread (and re-surfaces a pending approval interrupt). If it is missing we
@@ -55,15 +62,32 @@ function HomeContent() {
     */
     <CopilotChatConfigurationProvider agentId="default" threadId={threadId}>
       <ApprovalInterrupt />
-      <div className={styles.layout}>
+      <div
+        className={`${styles.layout} ${hasDrawer ? "" : styles.layoutNoThreads}`}
+      >
         {/* SDK threads drawer (replaces the hand-rolled fork). License-gated: the locked view's Upgrade CTA opens the Intelligence docs by default. */}
-        <CopilotThreadsDrawer
-          agentId="default"
-          onThreadSelect={(id) => setThread(id)}
-          onNewThread={() => setThread(crypto.randomUUID())}
-        />
-        <div className={styles.mainPanel}>
+        {hasDrawer && (
+          <CopilotThreadsDrawer
+            agentId="default"
+            onThreadSelect={(id) => setThread(id)}
+            onNewThread={() => setThread(crypto.randomUUID())}
+          />
+        )}
+        <div
+          className={`${styles.mainPanel} ${hasDrawer ? "" : styles.mainPanelFullWidth}`}
+        >
+          {intelligence === "unreachable" && (
+            <div
+              role="alert"
+              className="border-b border-[var(--border)] bg-[var(--muted)] px-4 py-2 text-sm"
+            >
+              CopilotKit Intelligence is unreachable at {intelligenceUrl}. Threads
+              and chat won&apos;t work until it&apos;s running (for the local
+              stack, start Docker).
+            </div>
+          )}
           <ExampleLayout
+            hasThreadsDrawer={hasDrawer}
             chatContent={
               <CopilotChat
                 attachments={{ enabled: true }}
