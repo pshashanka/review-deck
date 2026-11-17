@@ -9,6 +9,7 @@ handle_action -> render_findings (only when a finding changed) | END;  chat -> E
 
 import logging
 import os
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -20,42 +21,54 @@ from src.review.state import ReviewState
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_CHECKPOINT_DB = "checkpoints.db"
+# Default checkpoint database, relative to the repository root (agent/..).
+DEFAULT_CHECKPOINT_DB = "agent/.checkpoints/checkpoints.db"
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
 
 def _checkpoint_db_path() -> str:
-    db = (os.getenv("LANGGRAPH_CHECKPOINT_DB") or "").strip()
-    if db:
-        return db
-    return str(Path(__file__).resolve().parent.parent / ".checkpoints" / DEFAULT_CHECKPOINT_DB)
+    """Absolute path of the checkpoint database.
+
+    A relative ``LANGGRAPH_CHECKPOINT_DB`` (and the default) resolves against
+    the repository root, matching how ``.env`` paths are written in the README.
+    ``~`` is expanded here so the same path reaches ``mkdir`` and ``connect``.
+    """
+    db = (os.getenv("LANGGRAPH_CHECKPOINT_DB") or "").strip() or DEFAULT_CHECKPOINT_DB
+    path = Path(db).expanduser()
+    if not path.is_absolute():
+        path = _REPO_ROOT / path
+    return str(path)
 
 
-async def build_persistent_checkpointer():
-    """SQLite-backed checkpointer so threads, pending approvals and posted
-    comments survive an agent restart (uvicorn runs with reload, and the
-    memory saver loses everything on every process bounce).
+async def enter_checkpointer(stack: AsyncExitStack):
+    """Open a persistent SQLite checkpointer on ``stack``.
 
-    ``LANGGRAPH_CHECKPOINT_DB`` overrides the database location (use
-    ``:memory:`` to go back to an in-memory store); the default lives in
-    ``agent/.checkpoints/checkpoints.db``. Falls back to ``MemorySaver`` when
-    the async sqlite package is missing or the database can't be opened.
+    The async saver must be created inside the running event loop (it binds its
+    connection to that loop). Entering through ``AsyncSqliteSaver.from_conn_string``
+    on the caller's ``AsyncExitStack`` hands connection teardown to the stack, and
+    ``setup()`` runs eagerly so an unusable database (corrupt, locked,
+    non-database, read-only) fails here and falls back to ``MemorySaver`` rather
+    than failing every request later.
 
-    Must be called from inside a running event loop: the async saver binds its
-    connection to the loop it is created on.
+    Returns the saver, or ``MemorySaver`` when the sqlite packages are missing or
+    the database cannot be opened.
     """
     db = _checkpoint_db_path()
     try:
-        import aiosqlite
-
         from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
     except ImportError:
+        logger.warning(
+            "langgraph-checkpoint-sqlite (and its aiosqlite dependency) is not installed; "
+            "checkpoints will not survive an agent restart (using in-memory state)"
+        )
         return MemorySaver()
 
     try:
         if db != ":memory:":
-            Path(db).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
-        conn = await aiosqlite.connect(db)
-        return AsyncSqliteSaver(conn)
+            Path(db).parent.mkdir(parents=True, exist_ok=True)
+        saver = await stack.enter_async_context(AsyncSqliteSaver.from_conn_string(db))
+        await saver.setup()
+        return saver
     except Exception:
         logger.exception("could not open checkpoint database at %s; using in-memory state", db)
         return MemorySaver()

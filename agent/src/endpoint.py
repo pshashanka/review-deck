@@ -25,6 +25,28 @@ logger = logging.getLogger(__name__)
 POLL_SECONDS = 0.5
 _DONE = object()
 
+# Producer tasks for in-flight runs. Drained (cancelled + awaited) on shutdown so
+# no task writes to a checkpoint connection that is about to close.
+_in_flight_tasks: set[asyncio.Task] = set()
+
+
+def _track(task: asyncio.Task) -> None:
+    _in_flight_tasks.add(task)
+    task.add_done_callback(_in_flight_tasks.discard)
+
+
+async def drain_in_flight_runs() -> None:
+    """Cancel and await every in-flight run producer.
+
+    Called before the checkpoint connection closes so a mid-review shutdown
+    cannot leave a task writing to a closed database.
+    """
+    tasks = list(_in_flight_tasks)
+    for task in tasks:
+        task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 
 async def iter_until_disconnect(
     events: AsyncIterator[Any],
@@ -44,6 +66,7 @@ async def iter_until_disconnect(
             await queue.put(_DONE)
 
     producer = asyncio.create_task(produce())
+    _track(producer)
     try:
         while True:
             try:
@@ -64,11 +87,32 @@ async def iter_until_disconnect(
             producer.cancel()  # not awaited: we may be inside a cancelled scope
 
 
-def add_cancellable_endpoint(app: FastAPI, agent: LangGraphAgent, path: str = "/") -> None:
+def add_cancellable_endpoint(
+    app: FastAPI,
+    agent: LangGraphAgent | None = None,
+    path: str = "/",
+    agent_factory: Callable[[], LangGraphAgent | None] | None = None,
+) -> None:
+    """Register the AG-UI endpoint.
+
+    Pass either a concrete ``agent`` or an ``agent_factory`` that resolves the
+    agent per request (used when the agent is built in the app lifespan). Routes
+    are registered once here, so they exist even if the lifespan has not run.
+    """
+
+    def resolve() -> LangGraphAgent | None:
+        return agent_factory() if agent_factory is not None else agent
+
+    def require_agent() -> LangGraphAgent:
+        resolved = resolve()
+        if resolved is None:
+            raise RuntimeError("agent is not ready; the app lifespan has not started")
+        return resolved
+
     @app.post(path)
     async def agent_endpoint(input_data: RunAgentInput, request: Request):
         encoder = EventEncoder(accept=request.headers.get("accept"))
-        request_agent = agent.clone()  # per-request state, as in ag_ui_langgraph
+        request_agent = require_agent().clone()  # per-request state, as in ag_ui_langgraph
 
         async def event_generator():
             async for event in iter_until_disconnect(request_agent.run(input_data), request.is_disconnected):
@@ -78,4 +122,5 @@ def add_cancellable_endpoint(app: FastAPI, agent: LangGraphAgent, path: str = "/
 
     @app.get(f"{path.rstrip('/')}/health")
     def health():
-        return {"status": "ok", "agent": {"name": agent.name}}
+        resolved = resolve()
+        return {"status": "ok", "agent": {"name": resolved.name if resolved is not None else None}}

@@ -59,7 +59,7 @@ Edit `.env`:
 | `GITHUB_API_URL` | Optional GitHub API base (GitHub Enterprise). Default `https://api.github.com`. Note the PR URL parser only accepts `github.com` links. |
 | `REVIEW_DISCUSSION` | Optional. Set `0`, `false` or `off` to stop fetching existing PR comments for the reviewers. Default on. `GITHUB_TOKEN` is needed to exclude resolved review threads. |
 | `REVIEW_DISCUSSION_MAX_CHARS` | Optional character budget for the PR discussion shown to reviewers. Default `12000`; invalid or non-positive values fall back to it. |
-| `LANGGRAPH_CHECKPOINT_DB` | Optional SQLite database path for persistent checkpoints (threads, approvals, posted-comment status). Default `agent/.checkpoints/checkpoints.db`; use `:memory:` for the old in-memory behavior. |
+| `LANGGRAPH_CHECKPOINT_DB` | Optional SQLite database path for persistent checkpoints (threads, approvals, posted-comment status). Default `agent/.checkpoints/checkpoints.db`; use `:memory:` for the old in-memory behavior. Relative paths (and `~`) resolve against the repository root. |
 | `*_MODEL`, `*_BUDGET_SECONDS` | Per-step routing and time budgets; see Choosing models. |
 | `CPK_INTELLIGENCE_API_KEY` etc. | Optional (`INTELLIGENCE_API_URL`, `INTELLIGENCE_GATEWAY_WS_URL`, `COPILOTKIT_LICENSE_TOKEN`). Enables the CopilotKit Intelligence threads drawer. Without it, an in-memory runner is used. |
 
@@ -204,6 +204,8 @@ npm run build                    # stop the dev server first; build writes .next
 ## Known limitations
 
 - State is checkpointed in SQLite (`agent/.checkpoints/checkpoints.db` by default, override with `LANGGRAPH_CHECKPOINT_DB`), so threads, pending approvals and posted-comment status survive agent restarts. The database is per machine and not shared across hosts.
+- The checkpoint database grows with every run and is never pruned; delete the file (with the agent stopped) to reset all state.
+- If the agent is restarted in the brief window after GitHub accepts a comment but before the finding's `applied` status is checkpointed, the finding appears `open` again and clicking Apply fix can post a duplicate comment.
 - Reviews vary from run to run because they come from LLMs.
 - The correctness reviewer sees only the diff, not callers elsewhere in the repo.
 - Diffs are capped (20,000 chars per file, 60,000 total); files beyond that are not reviewed.
