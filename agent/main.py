@@ -20,7 +20,7 @@ from fastapi import FastAPI
 import uvicorn
 from copilotkit import LangGraphAGUIAgent
 from src.agent import build_graph, enter_checkpointer
-from src.endpoint import add_cancellable_endpoint, drain_in_flight_runs
+from src.endpoint import add_cancellable_endpoint, drain_in_flight_runs, reset_in_flight_runs
 
 # Filled by the lifespan; the endpoint (registered at import) resolves it per request.
 _agent: LangGraphAGUIAgent | None = None
@@ -37,6 +37,7 @@ async def lifespan(app: FastAPI):
     """
     global _agent
     async with AsyncExitStack() as stack:
+        reset_in_flight_runs()
         checkpointer = await enter_checkpointer(stack)
         _agent = LangGraphAGUIAgent(
             name="sample_agent",

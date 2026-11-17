@@ -12,6 +12,18 @@ def anyio_backend():
     return "asyncio"
 
 
+@pytest.fixture(autouse=True)
+def _reset_endpoint_state():
+    """Reset the shutdown flag and in-flight task set between tests."""
+    from src import endpoint
+
+    endpoint.reset_in_flight_runs()
+    endpoint._in_flight_tasks.clear()
+    yield
+    endpoint.reset_in_flight_runs()
+    endpoint._in_flight_tasks.clear()
+
+
 async def never():
     return False
 
@@ -121,3 +133,32 @@ def test_health_matches_stock(monkeypatch):
     stock = FastAPI()
     add_langgraph_fastapi_endpoint(stock, agent, path="/")
     assert client.get("/health").json() == TestClient(stock).get("/health").json()
+
+
+def test_503_when_agent_not_ready():
+    app = FastAPI()
+    add_cancellable_endpoint(app, agent_factory=lambda: None, path="/")
+    client = TestClient(app)  # no lifespan: the route exists but the agent isn't set
+    body = {"threadId": "ep2", "runId": "r2", "state": {}, "tools": [], "context": [],
+            "forwardedProps": {}, "messages": [{"id": "m2", "role": "user", "content": "hello"}]}
+    r = client.post("/", json=body, headers={"accept": "text/event-stream"})
+    assert r.status_code == 503
+
+
+async def test_drain_cancels_in_flight_runs_and_rejects_new():
+    from src import endpoint
+
+    endpoint.reset_in_flight_runs()
+    started = asyncio.Event()
+
+    async def slow():
+        started.set()
+        await asyncio.sleep(30)
+
+    task = asyncio.create_task(slow())
+    endpoint._track(task)
+    await started.wait()
+
+    await endpoint.drain_in_flight_runs()
+    assert task.cancelled()
+    assert endpoint._shutting_down.is_set()

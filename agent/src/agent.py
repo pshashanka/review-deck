@@ -32,8 +32,11 @@ def _checkpoint_db_path() -> str:
     A relative ``LANGGRAPH_CHECKPOINT_DB`` (and the default) resolves against
     the repository root, matching how ``.env`` paths are written in the README.
     ``~`` is expanded here so the same path reaches ``mkdir`` and ``connect``.
+    ``:memory:`` is returned unchanged (an in-memory database, not a file).
     """
     db = (os.getenv("LANGGRAPH_CHECKPOINT_DB") or "").strip() or DEFAULT_CHECKPOINT_DB
+    if db == ":memory:":
+        return db
     path = Path(db).expanduser()
     if not path.is_absolute():
         path = _REPO_ROOT / path

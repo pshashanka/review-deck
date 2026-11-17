@@ -345,6 +345,25 @@ async def test_review_flow_survives_restart_on_sqlite(monkeypatch, tmp_path):
         assert snap.values["node_status"]["render_findings"] == "done"
 
 
+def test_checkpoint_db_path_memory(monkeypatch):
+    """``LANGGRAPH_CHECKPOINT_DB=:memory:`` must stay in-memory, not a file."""
+    from src.agent import _checkpoint_db_path
+
+    monkeypatch.setenv("LANGGRAPH_CHECKPOINT_DB", ":memory:")
+    assert _checkpoint_db_path() == ":memory:"
+
+
+def test_checkpoint_db_path_relative_resolves_to_repo_root(monkeypatch):
+    from pathlib import Path
+
+    from src.agent import _checkpoint_db_path
+
+    monkeypatch.setenv("LANGGRAPH_CHECKPOINT_DB", "agent/.checkpoints/cp.db")
+    assert _checkpoint_db_path() == str(
+        Path(__file__).resolve().parents[2] / "agent" / ".checkpoints" / "cp.db"
+    )
+
+
 def _url(n):
     return f"https://github.com/o/r/pull/{n}"
 
