@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from src import github
-from src.agent import graph
+from src.agent import build_persistent_checkpointer, graph
 from src.review import nodes
 from src.review.models import ReviewerFinding, ReviewerOutput
 from src.review.state import merge_findings
@@ -280,6 +280,41 @@ def test_merge_findings():
     b = [{"id": "x", "t": 2}, {"id": "z", "t": 2}]
     assert merge_findings(a, b) == [{"id": "x", "t": 2}, {"id": "y", "t": 1}, {"id": "z", "t": 2}]
     assert merge_findings(None, b) == b
+
+
+async def test_persistent_checkpointer_survives_reopen(monkeypatch, tmp_path):
+    """The SQLite checkpointer keeps state across close/reopen (agent restart)."""
+    from typing import TypedDict
+
+    from langgraph.graph import END, START, StateGraph
+
+    class State(TypedDict):
+        x: int
+
+    async def bump(state):
+        return {"x": state["x"] + 1}
+
+    def make(checkpointer):
+        g = StateGraph(State)
+        g.add_node("bump", bump)
+        g.add_edge(START, "bump")
+        g.add_edge("bump", END)
+        return g.compile(checkpointer=checkpointer)
+
+    monkeypatch.setenv("LANGGRAPH_CHECKPOINT_DB", str(tmp_path / "checkpoints.db"))
+    config = {"configurable": {"thread_id": "persist-1"}}
+
+    first = await build_persistent_checkpointer()
+    g1 = make(first)
+    await g1.ainvoke({"x": 1}, config)
+    assert (await g1.aget_state(config)).values["x"] == 2
+    await first.conn.close()
+
+    # A fresh saver on the same file is the equivalent of an agent restart.
+    second = await build_persistent_checkpointer()
+    g2 = make(second)
+    assert (await g2.aget_state(config)).values["x"] == 2
+    await second.conn.close()
 
 
 def _url(n):

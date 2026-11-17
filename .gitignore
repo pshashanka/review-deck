@@ -55,6 +55,9 @@ __pycache__/
 .venv/
 .langgraph_api/
 
+# LangGraph persistent checkpoints (created at runtime by the agent)
+.checkpoints/
+
 # Added by CopilotKit CLI: browser snapshots a coding agent writes.
 .playwright-mcp/
 .copilotkit/local.json
