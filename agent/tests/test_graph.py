@@ -5,7 +5,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
 
 from src import github
-from src.agent import graph
+from src.agent import build_graph, enter_checkpointer, graph
 from src.review import nodes
 from src.review.models import ReviewerFinding, ReviewerOutput
 from src.review.state import merge_findings
@@ -280,6 +280,88 @@ def test_merge_findings():
     b = [{"id": "x", "t": 2}, {"id": "z", "t": 2}]
     assert merge_findings(a, b) == [{"id": "x", "t": 2}, {"id": "y", "t": 1}, {"id": "z", "t": 2}]
     assert merge_findings(None, b) == b
+
+
+async def test_persistent_checkpointer_survives_reopen(monkeypatch, tmp_path):
+    """The SQLite checkpointer keeps state across close/reopen (agent restart)."""
+    from contextlib import AsyncExitStack
+    from typing import TypedDict
+
+    from langgraph.graph import END, START, StateGraph
+
+    class State(TypedDict):
+        x: int
+
+    async def bump(state):
+        return {"x": state["x"] + 1}
+
+    def make(checkpointer):
+        g = StateGraph(State)
+        g.add_node("bump", bump)
+        g.add_edge(START, "bump")
+        g.add_edge("bump", END)
+        return g.compile(checkpointer=checkpointer)
+
+    monkeypatch.setenv("LANGGRAPH_CHECKPOINT_DB", str(tmp_path / "checkpoints.db"))
+    config = {"configurable": {"thread_id": "persist-1"}}
+
+    async with AsyncExitStack() as stack:
+        first = await enter_checkpointer(stack)
+        g1 = make(first)
+        await g1.ainvoke({"x": 1}, config)
+        assert (await g1.aget_state(config)).values["x"] == 2
+
+    # A fresh saver on the same file is the equivalent of an agent restart.
+    async with AsyncExitStack() as stack:
+        second = await enter_checkpointer(stack)
+        g2 = make(second)
+        assert (await g2.aget_state(config)).values["x"] == 2
+
+
+async def test_review_flow_survives_restart_on_sqlite(monkeypatch, tmp_path):
+    """The real review flow (ReviewState with pr, findings, discussion and usage)
+    serializes through the production SQLite checkpointer and survives a reopen."""
+    from contextlib import AsyncExitStack
+
+    monkeypatch.setenv("LANGGRAPH_CHECKPOINT_DB", str(tmp_path / "checkpoints.db"))
+    monkeypatch.setattr(github, "fetch_pr", lambda o, r, n, **kw: _pr())
+    config = cfg("persist-flow")
+
+    async with AsyncExitStack() as stack:
+        cp = await enter_checkpointer(stack)
+        g = build_graph(checkpointer=cp)
+        out = await g.ainvoke({"messages": [HumanMessage(content=URL)]}, config)
+        assert sorted(f["id"] for f in out["findings"]) == [
+            "abc-correctness-1", "abc-security-1", "abc-tests-1"]
+        assert (await g.aget_state(config)).values["pr"]["number"] == 7
+
+    # Restart: a fresh graph/checkpointer on the same file still sees the thread.
+    async with AsyncExitStack() as stack:
+        cp2 = await enter_checkpointer(stack)
+        g2 = build_graph(checkpointer=cp2)
+        snap = await g2.aget_state(config)
+        assert sorted(f["id"] for f in snap.values["findings"]) == [
+            "abc-correctness-1", "abc-security-1", "abc-tests-1"]
+        assert snap.values["node_status"]["render_findings"] == "done"
+
+
+def test_checkpoint_db_path_memory(monkeypatch):
+    """``LANGGRAPH_CHECKPOINT_DB=:memory:`` must stay in-memory, not a file."""
+    from src.agent import _checkpoint_db_path
+
+    monkeypatch.setenv("LANGGRAPH_CHECKPOINT_DB", ":memory:")
+    assert _checkpoint_db_path() == ":memory:"
+
+
+def test_checkpoint_db_path_relative_resolves_to_repo_root(monkeypatch):
+    from pathlib import Path
+
+    from src.agent import _checkpoint_db_path
+
+    monkeypatch.setenv("LANGGRAPH_CHECKPOINT_DB", "agent/.checkpoints/cp.db")
+    assert _checkpoint_db_path() == str(
+        Path(__file__).resolve().parents[2] / "agent" / ".checkpoints" / "cp.db"
+    )
 
 
 def _url(n):
